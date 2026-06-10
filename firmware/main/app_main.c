@@ -1,20 +1,22 @@
 /**
  * @file app_main.c
- * @brief Phase 1 / Step 6 - I2C: scan the bus (find the MPU6050).
+ * @brief Phase 1 / Step 7 - Multi-tasking across both ESP32 cores.
  *
- * We keep the deterministic timing + PWM structure from Steps 4-5:
+ * Architecture (the split we're building toward):
  *
- *     GPTimer alarm (hardware) --ISR--> task notification --> control_task
- *     control_task computes a duty each tick -> LEDC PWM
+ *     Core 1 (APP_CPU):  control_task  - hard real-time loop, no slow work
+ *           GPTimer ISR --notify--> control_task --> LEDC PWM
+ *           control_task --(1-slot queue)--> telemetry snapshot
  *
- * and now add an I2C master bus and a boot-time scan that probes every address
- * to report which devices are connected. Next step we'll actually read the
- * MPU6050 over this same bus.
+ *     Core 0 (PRO_CPU):  reporter_task - consumes telemetry and logs it
+ *           (this is where Wi-Fi + a web server will live in Phase 2)
  *
  * What this teaches:
- *   - Setting up an I2C master bus (SDA/SCL pins, internal pull-ups, speed).
- *   - "Scanning": probing each 7-bit address and seeing who ACKs.
- *   - Confirming wiring before writing a full sensor driver.
+ *   - Running multiple FreeRTOS tasks, each pinned to a specific core.
+ *   - Keeping the real-time loop lean by moving slow work (logging, later
+ *     networking) to another task/core.
+ *   - Passing data between tasks safely with a queue used as a "mailbox"
+ *     (length 1 + xQueueOverwrite = always holds the latest snapshot).
  *
  * Wiring the MPU6050 (GY-521 module has its own pull-ups):
  *   VCC -> 3V3, GND -> GND, SDA -> GPIO21, SCL -> GPIO22, AD0 -> GND (addr 0x68).
@@ -25,6 +27,7 @@
 #include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 #include "driver/ledc.h"
@@ -60,6 +63,19 @@ static const char *TAG = "balance_bot";
 
 static TaskHandle_t s_control_task;
 static i2c_master_bus_handle_t s_i2c_bus;   /* kept for the next step (reading the IMU) */
+
+/* Snapshot of loop state, produced by control_task and consumed by reporter_task. */
+typedef struct {
+    uint32_t ticks;        /* total control ticks so far */
+    int64_t  dt_avg_us;    /* average loop period over the last window */
+    int64_t  dt_min_us;    /* min/max loop period (jitter) over the window */
+    int64_t  dt_max_us;
+    float    duty;         /* last PWM level [0..1] */
+} telemetry_t;
+
+/* 1-slot queue used as a mailbox: control_task overwrites it with the latest
+ * snapshot; reporter_task blocks until a new one arrives. */
+static QueueHandle_t s_telemetry_q;
 
 /* ISR context: keep it minimal - just wake the control task for the next tick. */
 static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
@@ -200,21 +216,43 @@ static void control_task(void *arg)
         dt_sum += dt;
         ticks++;
 
+        /* Once per second, hand a snapshot to the reporter task and reset the
+         * window. xQueueOverwrite never blocks, so the control loop stays lean -
+         * the slow logging/networking happens on the other core. */
         if (ticks % CONTROL_HZ == 0) {
-            int64_t avg = dt_sum / CONTROL_HZ;
-            ESP_LOGI(TAG, "rate=%d Hz dt avg=%lld us (min=%lld max=%lld) duty=%.0f%%",
-                     CONTROL_HZ, (long long)avg, (long long)dt_min,
-                     (long long)dt_max, level * 100.0f);
+            telemetry_t snap = {
+                .ticks     = ticks,
+                .dt_avg_us = dt_sum / CONTROL_HZ,
+                .dt_min_us = dt_min,
+                .dt_max_us = dt_max,
+                .duty      = level,
+            };
+            xQueueOverwrite(s_telemetry_q, &snap);
             dt_min = INT64_MAX; dt_max = 0; dt_sum = 0;
+        }
+    }
+}
+
+/* Runs on core 0. Blocks until the control task posts a snapshot, then logs it.
+ * In Phase 2 this task (or a sibling on core 0) will serve the data over Wi-Fi. */
+static void reporter_task(void *arg)
+{
+    telemetry_t snap;
+    for (;;) {
+        if (xQueueReceive(s_telemetry_q, &snap, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI(TAG,
+                     "[core %d] rate=%d Hz dt avg=%lld us (min=%lld max=%lld) duty=%.0f%% ticks=%" PRIu32,
+                     xPortGetCoreID(), CONTROL_HZ,
+                     (long long)snap.dt_avg_us, (long long)snap.dt_min_us,
+                     (long long)snap.dt_max_us, snap.duty * 100.0f, snap.ticks);
         }
     }
 }
 
 void app_main(void)
 {
-    printf("\n=== Self-Balancing Vehicle - I2C scan + PWM on the control tick ===\n");
-    ESP_LOGI(TAG, "GPTimer @ %d Hz -> control_task -> LEDC PWM fade on GPIO%d",
-             CONTROL_HZ, PWM_GPIO);
+    printf("\n=== Self-Balancing Vehicle - dual-core multitasking ===\n");
+    ESP_LOGI(TAG, "core 1 = control loop, core 0 = reporter (Wi-Fi later)");
 
     pwm_init();
 
@@ -222,7 +260,15 @@ void app_main(void)
     i2c_init();
     i2c_scan();
 
-    /* Create the control task first so the ISR has a valid handle to notify. */
+    /* Mailbox between the two tasks (length 1 -> always the latest snapshot). */
+    s_telemetry_q = xQueueCreate(1, sizeof(telemetry_t));
+    configASSERT(s_telemetry_q);
+
+    /* Reporter on core 0 (PRO_CPU) - shares this core with Wi-Fi later. */
+    xTaskCreatePinnedToCore(reporter_task, "reporter", 4096, NULL, 4, NULL, 0);
+
+    /* Control loop on core 1 (APP_CPU), high priority. Create it before the
+     * timer so the ISR has a valid task handle to notify. */
     xTaskCreatePinnedToCore(control_task, "control", 4096, NULL,
                             configMAX_PRIORITIES - 2, &s_control_task, 1);
 
