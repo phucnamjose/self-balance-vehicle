@@ -1,0 +1,33 @@
+# ---- ESP-IDF / firmware build artifacts ----
+firmware/build/
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+*.bin
+*.elf
+*.map
+
+# managed components fetched by the IDF component manager
+firmware/managed_components/
+managed_components/
+dependencies.lock
+
+# ---- MATLAB / Simulink artifacts ----
+*.asv
+*.m~
+*.mex*
+*.slxc
+slprj/
+*.autosave
+simulation/**/*.fig
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Misc ----
+*.log

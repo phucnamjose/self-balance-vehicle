@@ -1,0 +1,7 @@
+# Minimal project defaults. We'll add options here as features are introduced
+# (e.g. Wi-Fi, custom partitions) in later roadmap phases.
+
+CONFIG_IDF_TARGET="esp32"
+
+# 1 kHz tick gives 1 ms scheduling resolution (handy once we add control loops).
+CONFIG_FREERTOS_HZ=1000
