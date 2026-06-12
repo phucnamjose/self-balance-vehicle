@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Balance Bot Terminal</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0e1116; color: #e6edf3; margin: 0; padding: 16px; }
+    h1 { font-size: 18px; }
+    .k { color: #8b96a5; }
+    .v { font-variant-numeric: tabular-nums; }
+    #term {
+      margin-top: 12px; height: 55vh; overflow: auto;
+      background: #171c24; border: 1px solid #222a35; border-radius: 8px;
+      padding: 8px; font-family: monospace; font-size: 13px; white-space: pre-wrap;
+    }
+    .cmd { color: #6ea8fe; }
+    .resp { color: #22c55e; }
+    .sys { color: #8b96a5; }
+    #bar { display: flex; gap: 8px; margin-top: 8px; }
+    #in { flex: 1; background: #0f141b; border: 1px solid #2a3340; color: #e6edf3;
+          border-radius: 8px; padding: 8px; font-family: monospace; }
+    button { background: #3b82f6; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #ef4444; margin-right: 6px; }
+    .dot.on { background: #22c55e; }
+    #ota { margin-top: 12px; padding-top: 10px; border-top: 1px solid #222a35; font-size: 13px; }
+    #ota input[type=file] { color: #8b96a5; }
+    #otastat { margin-left: 8px; }
+    #bar2 { height: 6px; background: #171c24; border-radius: 4px; margin-top: 6px; overflow: hidden; display: none; }
+    #bar2 > div { height: 100%; width: 0; background: #3b82f6; transition: width .1s; }
+  </style>
+</head>
+<body>
+  <h1><span id="dot" class="dot"></span>Balance Bot - terminal</h1>
+  <div>
+    <span class="k">rate:</span> <span class="v" id="rate">--</span> Hz &nbsp;
+    <span class="k">dt avg:</span> <span class="v" id="avg">--</span> us &nbsp;
+    <span class="k">min:</span> <span class="v" id="min">--</span> &nbsp;
+    <span class="k">max:</span> <span class="v" id="max">--</span> &nbsp;
+    <span class="k">duty:</span> <span class="v" id="duty">--</span>%
+  </div>
+  <div style="margin-top:6px">
+    <span class="k">accel (g):</span> <span class="v" id="acc">--</span> &nbsp;
+    <span class="k">gyro (dps):</span> <span class="v" id="gyr">--</span> &nbsp;
+    <span class="k">temp:</span> <span class="v" id="temp">--</span> &deg;C
+  </div>
+
+  <div id="term"></div>
+  <div id="bar">
+    <input id="in" placeholder="type a command (try: help) and press Enter" autocomplete="off" />
+    <button onclick="sendCmd()">Send</button>
+  </div>
+
+  <div id="ota">
+    <span class="k">firmware (OTA):</span>
+    <input type="file" id="fw" accept=".bin" />
+    <button onclick="upload()">Flash</button>
+    <span id="otastat" class="sys"></span>
+    <div id="bar2"><div id="bar2fill"></div></div>
+  </div>
+
+  <script>
+    const term = document.getElementById('term');
+    const dot = document.getElementById('dot');
+    const input = document.getElementById('in');
+    let ws, lastTicks = -1;
+
+    function add(text, cls) {
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = text + '\n';
+      term.appendChild(span);
+      term.scrollTop = term.scrollHeight;
+      while (term.childElementCount > 500) term.removeChild(term.firstChild);
+    }
+
+    const f2 = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
+    const f1 = (x) => (x >= 0 ? '+' : '') + x.toFixed(1);
+
+    function setValues(d) {
+      rate.textContent = d.rate;
+      avg.textContent = d.dt_avg;
+      min.textContent = d.dt_min;
+      max.textContent = d.dt_max;
+      duty.textContent = (d.duty * 100).toFixed(0);
+      if (d.imu_ok) {
+        acc.textContent = `${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}`;
+        gyr.textContent = `${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}`;
+        temp.textContent = d.temp.toFixed(1);
+      } else {
+        acc.textContent = gyr.textContent = temp.textContent = 'no IMU';
+      }
+    }
+
+    function connect() {
+      ws = new WebSocket(`ws://${location.host}/ws`);
+      ws.onopen = () => { dot.classList.add('on'); add('connected', 'sys'); };
+      ws.onclose = () => { dot.classList.remove('on'); add('disconnected - retrying...', 'sys'); setTimeout(connect, 1500); };
+      ws.onmessage = (ev) => {
+        let d; try { d = JSON.parse(ev.data); } catch (e) { add(ev.data); return; }
+        if (d.type === 'telemetry') {
+          setValues(d);
+          if (d.ticks !== lastTicks) {
+            lastTicks = d.ticks;
+            const ts = new Date().toLocaleTimeString();
+            const imu = d.imu_ok
+              ? ` a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
+              : ' imu:off';
+            add(`${ts}  ticks=${d.ticks} dt=${d.dt_avg}us(min ${d.dt_min}/max ${d.dt_max}) duty=${(d.duty * 100).toFixed(0)}%${imu}`);
+          }
+        } else if (d.type === 'resp_stats') {
+          setValues(d);
+          add(`stats: rate=${d.rate}Hz dt_avg=${d.dt_avg}us min=${d.dt_min} max=${d.dt_max} duty=${(d.duty * 100).toFixed(0)}%`, 'resp');
+        } else if (d.type === 'resp') {
+          add(d.text, 'resp');
+        }
+      };
+    }
+
+    function sendCmd() {
+      const cmd = input.value.trim();
+      if (!cmd || !ws || ws.readyState !== WebSocket.OPEN) return;
+      add('> ' + cmd, 'cmd');
+      ws.send(cmd);
+      input.value = '';
+    }
+
+    function upload() {
+      const f = document.getElementById('fw').files[0];
+      const stat = document.getElementById('otastat');
+      const bar = document.getElementById('bar2');
+      const fill = document.getElementById('bar2fill');
+      if (!f) { stat.textContent = 'pick a .bin file first'; return; }
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/ota');
+      bar.style.display = 'block';
+      add(`uploading firmware: ${f.name} (${(f.size / 1024).toFixed(0)} KB)...`, 'sys');
+
+      xhr.upload.onprogress = (e) => {
+        if (!e.lengthComputable) return;
+        const pct = (e.loaded / e.total * 100);
+        fill.style.width = pct + '%';
+        stat.textContent = `uploading ${pct.toFixed(0)}%`;
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          stat.textContent = 'flashed - device rebooting';
+          add('OTA OK - device is rebooting into the new image. Reconnect in a few seconds.', 'resp');
+        } else {
+          stat.textContent = 'failed: ' + (xhr.responseText || xhr.status);
+          add('OTA failed: ' + (xhr.responseText || xhr.status), 'resp');
+        }
+      };
+      xhr.onerror = () => { stat.textContent = 'upload error (connection lost)'; };
+      xhr.send(f);
+    }
+
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendCmd(); });
+    connect();
+  </script>
+</body>
+</html>

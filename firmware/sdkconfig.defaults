@@ -5,3 +5,14 @@ CONFIG_IDF_TARGET="esp32"
 
 # 1 kHz tick gives 1 ms scheduling resolution (handy once we add control loops).
 CONFIG_FREERTOS_HZ=1000
+
+# Enable WebSocket support in the HTTP server (interactive terminal).
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# --- OTA (wireless firmware upload) ---
+# Tell the build the board has a 4 MB flash chip...
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+# ...and use our two-slot OTA partition table instead of the 1 MB default.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
