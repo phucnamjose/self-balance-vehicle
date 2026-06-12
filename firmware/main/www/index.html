@@ -28,6 +28,10 @@
     #otastat { margin-left: 8px; }
     #bar2 { height: 6px; background: #171c24; border-radius: 4px; margin-top: 6px; overflow: hidden; display: none; }
     #bar2 > div { height: 100%; width: 0; background: #3b82f6; transition: width .1s; }
+    #motors { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    #motors select, #motors input[type=range] { background: #0f141b; border: 1px solid #2a3340; color: #e6edf3; border-radius: 6px; }
+    #mval { flex: 1; min-width: 140px; }
+    .stopbtn { background: #ef4444; }
   </style>
 </head>
 <body>
@@ -36,13 +40,29 @@
     <span class="k">rate:</span> <span class="v" id="rate">--</span> Hz &nbsp;
     <span class="k">dt avg:</span> <span class="v" id="avg">--</span> us &nbsp;
     <span class="k">min:</span> <span class="v" id="min">--</span> &nbsp;
-    <span class="k">max:</span> <span class="v" id="max">--</span> &nbsp;
-    <span class="k">duty:</span> <span class="v" id="duty">--</span>%
+    <span class="k">max:</span> <span class="v" id="max">--</span>
   </div>
   <div style="margin-top:6px">
     <span class="k">accel (g):</span> <span class="v" id="acc">--</span> &nbsp;
     <span class="k">gyro (dps):</span> <span class="v" id="gyr">--</span> &nbsp;
     <span class="k">temp:</span> <span class="v" id="temp">--</span> &deg;C
+  </div>
+  <div style="margin-top:6px">
+    <span class="k">motor L:</span> <span class="v" id="mL">--</span> &nbsp;
+    <span class="k">motor R:</span> <span class="v" id="mR">--</span>
+  </div>
+
+  <div id="motors">
+    <span class="k">motor test:</span>
+    <select id="msel">
+      <option value="both">both</option>
+      <option value="l">left</option>
+      <option value="r">right</option>
+    </select>
+    <input type="range" id="mval" min="-100" max="100" value="0" />
+    <span id="mvallbl" class="v">0%</span>
+    <button onclick="applyMotor()">Apply</button>
+    <button class="stopbtn" onclick="send('stop')">STOP</button>
   </div>
 
   <div id="term"></div>
@@ -82,13 +102,16 @@
       avg.textContent = d.dt_avg;
       min.textContent = d.dt_min;
       max.textContent = d.dt_max;
-      duty.textContent = (d.duty * 100).toFixed(0);
       if (d.imu_ok) {
         acc.textContent = `${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}`;
         gyr.textContent = `${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}`;
         temp.textContent = d.temp.toFixed(1);
       } else {
         acc.textContent = gyr.textContent = temp.textContent = 'no IMU';
+      }
+      if (d.mL !== undefined) {
+        mL.textContent = (d.mL * 100).toFixed(0) + '%';
+        mR.textContent = (d.mR * 100).toFixed(0) + '%';
       }
     }
 
@@ -106,24 +129,34 @@
             const imu = d.imu_ok
               ? ` a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
               : ' imu:off';
-            add(`${ts}  ticks=${d.ticks} dt=${d.dt_avg}us(min ${d.dt_min}/max ${d.dt_max}) duty=${(d.duty * 100).toFixed(0)}%${imu}`);
+            const mot = ` mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]%`;
+            add(`${ts}  ticks=${d.ticks} dt=${d.dt_avg}us(min ${d.dt_min}/max ${d.dt_max})${mot}${imu}`);
           }
         } else if (d.type === 'resp_stats') {
           setValues(d);
-          add(`stats: rate=${d.rate}Hz dt_avg=${d.dt_avg}us min=${d.dt_min} max=${d.dt_max} duty=${(d.duty * 100).toFixed(0)}%`, 'resp');
+          add(`stats: rate=${d.rate}Hz dt_avg=${d.dt_avg}us min=${d.dt_min} max=${d.dt_max} mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]%`, 'resp');
         } else if (d.type === 'resp') {
           add(d.text, 'resp');
         }
       };
     }
 
-    function sendCmd() {
-      const cmd = input.value.trim();
-      if (!cmd || !ws || ws.readyState !== WebSocket.OPEN) return;
+    function send(cmd) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       add('> ' + cmd, 'cmd');
       ws.send(cmd);
+    }
+
+    function sendCmd() {
+      const cmd = input.value.trim();
+      if (!cmd) return;
+      send(cmd);
       input.value = '';
     }
+
+    const mval = document.getElementById('mval');
+    mval.addEventListener('input', () => { document.getElementById('mvallbl').textContent = mval.value + '%'; });
+    function applyMotor() { send(`motor ${document.getElementById('msel').value} ${mval.value}`); }
 
     function upload() {
       const f = document.getElementById('fw').files[0];

@@ -6,9 +6,9 @@ example, verify it on hardware, check it off, and write a short note.
 
 Status legend: `[ ]` todo &nbsp; `[~]` in progress &nbsp; `[x]` done
 
-> Current focus: **Phase 3 - Step 2: add a PC command to query the sensor state.**
-> Calibration was deferred to Phase 8 (it'll be more meaningful alongside the model/sim).
-> Code: `firmware/main/app_main.c`.
+> Current focus: **Phase 4 - Step 2: test the real motor** (direction, deadband, max speed).
+> Open-loop driver is in: `motor <l|r|both> <-100..100>` / `stop` from the web terminal.
+> Code: `firmware/main/app_main.c`, `www/index.html`. Driver doc: `docs/hardware/xy-160d-motor-driver.md`.
 
 ---
 
@@ -34,14 +34,14 @@ Goal: develop without a USB cable - see logs and flash over Wi-Fi.
 Goal: trustworthy IMU data. (Calibration moved to Phase 8.)
 
 - [x] Read MPU6050 (raw accel/gyro over I2C)
-- [ ] Add a PC command to query the sensor state
 
 ## Phase 4 - Generate PWM to control motors
 Goal: drive the real motors and command them remotely.
 
-- [ ] Make a program to test PWM with a real motor
-- [ ] Test the real motor (direction, deadband, max speed)
-- [ ] Add a PC command to change the PWM
+- [x] Test PWM with 2 real motors
+- [~] Add a PC command to test the motor (direction, deadband, max speed)
+- [ ] Read encoder using timer
+- [ ] Add a PC command to reset encoder count
 
 ## Phase 5 - Build basic web app: states + log
 Goal: a dashboard to observe and poke the robot.
@@ -77,6 +77,10 @@ learned, where the code lives.
 
 | Date | Phase / Step | Notes |
 |------|--------------|-------|
+| 2026-06-12 | P2 (fix) | Fixed WS lag/`error in send: 11`: the blocking `httpd_ws_send_frame_async` ran inside reporter_task, so a slow client stalled it ~5 s (logs+web only updated every ~6 s). Now reporter strdups the frame and `httpd_queue_work`s it to the server task (non-blocking); failed sends drop the client (`httpd_sess_trigger_close`). Also `send_wait_timeout=2`, `lru_purge_enable=true`. Control loop was never affected. |
+| 2026-06-12 | P4 S1 | Dropped the LED PWM fade demo; GPIO2 is now a plain output (led_init/led_set) reserved for notification blinks. Removed the obsolete "duty" telemetry field everywhere (motors' mL/mR are the real actuator readout now). |
+| 2026-06-12 | P4 S1 | Open-loop motor driver: motor_init() sets up 2 LEDC PWM channels (ENA/ENB on GPIO25/33, timer 1, 10 kHz) + 4 direction GPIOs (26/27/32/14). motor_set(i,cmd) maps sign->dir, magnitude->duty. control_task applies s_motor_cmd[] each tick. Web terminal: "motor <l|r|both> <-100..100>" / "stop", plus a slider+STOP panel and mot=[L R]% in telemetry. Motors start stopped. |
+| 2026-06-12 | P4 | Documented the XY-160D dual H-bridge in docs/hardware/: specs, pinout, truth table, control scheme (PWM on ENA/ENB + direction on IN pins), proposed ESP32 wiring, safety. Key facts: 3.3V-logic compatible (direct GPIO drive), 7A/ch, PWM ceiling 10 kHz (NOT 20). Jumped here from P3; the P3 query-sensor command is deferred. |
 | 2026-06-12 | P3 | Reverted the calibration code (gyro bias + accel zero) and moved that task to Phase 8 - it'll be more meaningful once we have the model/sim and the IMU is mounted at its real (non-flat) orientation. Kept the unrelated 4 ms I2C-timeout safety fix. |
 | 2026-06-11 | P3 (safety) | Bounded the IMU I2C timeout to 4 ms (was 100 ms) so a bus glitch costs ~1 tick, not a 100 ms loop stall. Discussed read-in-loop vs split estimator rate: keeping 200 Hz combined; event-driven INT/FIFO deferred to the Kalman phase. |
 | 2026-06-11 | P3 S1 | Read MPU6050: added it as an I2C device, wake via PWR_MGMT_1, configure +/-2g/+/-250dps + DLPF. control_task reads the 14-byte block each tick, converts to g/dps/degC, ships it in telemetry. Web page + serial log now show accel/gyro/temp. Watch dt_min/max - the ~0.4ms I2C read sits inside the 5ms budget. Also added "rollback" WS command (switch to other OTA slot). |

@@ -1,6 +1,6 @@
 /**
  * @file app_main.c
- * @brief Phase 3 / Step 1 - Read the MPU6050 IMU (raw accel/gyro over I2C).
+ * @brief Phase 4 / Step 1 - Open-loop motor test (XY-160D dual H-bridge).
  *
  * Architecture:
  *
@@ -95,28 +95,51 @@ static const char *TAG = "balance_bot";
  * stalling the control loop for 100 ms. */
 #define MPU_I2C_TIMEOUT_MS     4
 
-#define PWM_GPIO       GPIO_NUM_2
+#define LED_GPIO       GPIO_NUM_2                 /* onboard LED - notification blink */
 
 #define CONTROL_HZ     200                       /* control loop rate */
 #define TIMER_RES_HZ   1000000                   /* 1 MHz -> 1 tick = 1 us */
 #define ALARM_COUNT    (TIMER_RES_HZ / CONTROL_HZ)
 
-/* --- LEDC (PWM) configuration --- */
+/* LEDC speed mode shared by the motor PWM channels (ESP32 low-speed group). */
 #define PWM_MODE       LEDC_LOW_SPEED_MODE
-#define PWM_TIMER      LEDC_TIMER_0
-#define PWM_CHANNEL    LEDC_CHANNEL_0
-#define PWM_RES_BITS   LEDC_TIMER_10_BIT         /* duty range 0..1023 */
-#define PWM_DUTY_MAX   ((1 << 10) - 1)
-#define PWM_FREQ_HZ    5000                      /* 5 kHz: flicker-free for an LED.
-                                                  * For real motors we'll use ~20 kHz. */
 
-/* Triangle-wave sweep: full fade up+down over this many control ticks. */
-#define FADE_PERIOD_TICKS  (CONTROL_HZ * 2)      /* ~2 s up, then handled by mirror */
+/* --- XY-160D dual H-bridge motor driver (see docs/hardware/xy-160d-motor-driver.md) ---
+ * Each motor: ENx = PWM speed, IN1/IN2 = direction. Left = ch 1, Right = ch 2. */
+#define MOTOR_L_PWM        GPIO_NUM_25            /* -> ENA */
+#define MOTOR_L_IN1        GPIO_NUM_26            /* -> IN1 */
+#define MOTOR_L_IN2        GPIO_NUM_27            /* -> IN2 */
+#define MOTOR_R_PWM        GPIO_NUM_33            /* -> ENB */
+#define MOTOR_R_IN1        GPIO_NUM_32            /* -> IN3 */
+#define MOTOR_R_IN2        GPIO_NUM_14            /* -> IN4 */
+
+#define MOTOR_PWM_TIMER    LEDC_TIMER_1           /* dedicated LEDC timer for motor PWM */
+#define MOTOR_L_CHANNEL    LEDC_CHANNEL_1
+#define MOTOR_R_CHANNEL    LEDC_CHANNEL_2
+#define MOTOR_PWM_RES_BITS LEDC_TIMER_10_BIT      /* duty 0..1023 */
+#define MOTOR_PWM_DUTY_MAX ((1 << 10) - 1)
+#define MOTOR_PWM_FREQ_HZ  10000                  /* XY-160D ceiling is 10 kHz; lower if it whines/heats */
 
 static TaskHandle_t s_control_task;
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mpu;       /* MPU6050 device on the I2C bus */
 static bool s_mpu_ok;                       /* did the IMU init succeed? */
+
+/* One motor's wiring. */
+typedef struct {
+    gpio_num_t     pwm_gpio;   /* ENx */
+    gpio_num_t     in1, in2;   /* direction pins */
+    ledc_channel_t channel;    /* LEDC channel driving ENx */
+} motor_t;
+
+static const motor_t s_motors[2] = {
+    { MOTOR_L_PWM, MOTOR_L_IN1, MOTOR_L_IN2, MOTOR_L_CHANNEL },   /* 0 = left  */
+    { MOTOR_R_PWM, MOTOR_R_IN1, MOTOR_R_IN2, MOTOR_R_CHANNEL },   /* 1 = right */
+};
+
+/* Open-loop command per motor, -1.0..+1.0 (sign = direction). Set from the web
+ * terminal, applied by control_task each tick. */
+static volatile float s_motor_cmd[2];
 
 /* One IMU sample in physical units. */
 typedef struct {
@@ -132,7 +155,7 @@ typedef struct {
     int64_t  dt_avg_us;    /* average loop period over the last window */
     int64_t  dt_min_us;    /* min/max loop period (jitter) over the window */
     int64_t  dt_max_us;
-    float    duty;         /* last PWM level [0..1] */
+    float    mL, mR;       /* commanded motor effort, -1..+1 */
     imu_t    imu;          /* latest IMU sample */
 } telemetry_t;
 
@@ -158,40 +181,156 @@ static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
     return high_prio_woken == pdTRUE;
 }
 
-static void pwm_init(void)
+/* ===================== Notification LED (non-blocking) ===================== */
+
+/* A tiny task owns the onboard LED (GPIO2). Callers post a blink pattern to a
+ * 1-slot mailbox and return immediately - no delays in the caller's context.
+ * A new request always preempts the one in progress. */
+typedef struct {
+    uint16_t on_ms;     /* on duration per blink */
+    uint16_t off_ms;    /* off duration per blink */
+    int16_t  count;     /* number of blinks; <0 = repeat forever; 0 = off */
+} led_pattern_t;
+
+static QueueHandle_t s_led_q;
+
+static inline void led_set(bool on) { gpio_set_level(LED_GPIO, on ? 1 : 0); }
+
+/* Non-blocking. Examples:
+ *   led_blink(60, 60, 3)     -> three quick blinks, then off
+ *   led_blink(60, 1940, -1)  -> slow heartbeat forever
+ *   led_blink(1, 0, -1)      -> solid on
+ *   led_blink(0, 0, 0)       -> off                                            */
+static void led_blink(uint16_t on_ms, uint16_t off_ms, int16_t count)
 {
-    /* 1) The LEDC timer sets the PWM frequency and duty resolution. */
+    led_pattern_t p = { on_ms, off_ms, count };
+    if (s_led_q) xQueueOverwrite(s_led_q, &p);
+}
+
+static inline void led_off(void)       { led_blink(0, 0, 0); }
+static inline void led_on(void)        { led_blink(1, 0, -1); }
+static inline void led_heartbeat(void) { led_blink(60, 1940, -1); }
+
+static void led_task(void *arg)
+{
+    led_pattern_t p = { 0, 0, 0 };
+    int  remaining = 0;          /* blinks left; -1 = forever; 0 = idle */
+    bool on = false;
+    TickType_t next = 0;         /* tick when the current phase ends */
+
+    for (;;) {
+        TickType_t now  = xTaskGetTickCount();
+        TickType_t wait = (remaining == 0) ? portMAX_DELAY
+                                           : (next > now ? next - now : 0);
+
+        led_pattern_t np;
+        if (xQueueReceive(s_led_q, &np, wait) == pdTRUE) {
+            p = np;
+            if (p.count == 0) {                       /* off */
+                remaining = 0; led_set(false);
+            } else if (p.off_ms == 0 && p.count < 0) { /* solid on */
+                remaining = 0; led_set(true);
+            } else {                                   /* start blinking */
+                remaining = (p.count < 0) ? -1 : p.count;
+                on = true; led_set(true);
+                next = xTaskGetTickCount() + pdMS_TO_TICKS(p.on_ms);
+            }
+            continue;
+        }
+
+        if (remaining == 0) continue;   /* idle: nothing to do */
+
+        if (on) {                       /* end of an ON phase -> go OFF */
+            on = false; led_set(false);
+            next = xTaskGetTickCount() + pdMS_TO_TICKS(p.off_ms);
+        } else {                        /* completed one full blink */
+            if (remaining > 0 && --remaining == 0) {
+                led_set(false);         /* finished the requested count */
+                continue;
+            }
+            on = true; led_set(true);
+            next = xTaskGetTickCount() + pdMS_TO_TICKS(p.on_ms);
+        }
+    }
+}
+
+static void led_init(void)
+{
+    gpio_config_t io = {
+        .mode         = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << LED_GPIO),
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+    gpio_set_level(LED_GPIO, 0);
+
+    s_led_q = xQueueCreate(1, sizeof(led_pattern_t));
+    configASSERT(s_led_q);
+    xTaskCreatePinnedToCore(led_task, "led", 2048, NULL, 2, NULL, 0);
+}
+
+/* ===================== XY-160D motors ===================== */
+
+/* Apply a signed command to one motor: sign -> direction pins, magnitude -> PWM
+ * duty on ENx. cmd 0 sets both IN pins low (brake/stop). */
+static void motor_set(int i, float cmd)
+{
+    if (cmd >  1.0f) cmd =  1.0f;
+    if (cmd < -1.0f) cmd = -1.0f;
+    const motor_t *m = &s_motors[i];
+
+    if (cmd > 0.0f) {                 /* forward */
+        gpio_set_level(m->in1, 1);
+        gpio_set_level(m->in2, 0);
+    } else if (cmd < 0.0f) {          /* reverse */
+        gpio_set_level(m->in1, 0);
+        gpio_set_level(m->in2, 1);
+    } else {                          /* stop (brake) */
+        gpio_set_level(m->in1, 0);
+        gpio_set_level(m->in2, 0);
+    }
+
+    float mag = (cmd < 0.0f) ? -cmd : cmd;
+    uint32_t duty = (uint32_t)(mag * MOTOR_PWM_DUTY_MAX + 0.5f);
+    ledc_set_duty(PWM_MODE, m->channel, duty);
+    ledc_update_duty(PWM_MODE, m->channel);
+}
+
+static void motor_init(void)
+{
+    /* Direction pins as outputs, start low (stopped). */
+    gpio_config_t io = {
+        .mode         = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = (1ULL << MOTOR_L_IN1) | (1ULL << MOTOR_L_IN2) |
+                        (1ULL << MOTOR_R_IN1) | (1ULL << MOTOR_R_IN2),
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+
+    /* One LEDC timer shared by both ENx channels (separate from the LED timer). */
     ledc_timer_config_t timer_cfg = {
         .speed_mode      = PWM_MODE,
-        .timer_num       = PWM_TIMER,
-        .duty_resolution = PWM_RES_BITS,
-        .freq_hz         = PWM_FREQ_HZ,
+        .timer_num       = MOTOR_PWM_TIMER,
+        .duty_resolution = MOTOR_PWM_RES_BITS,
+        .freq_hz         = MOTOR_PWM_FREQ_HZ,
         .clk_cfg         = LEDC_AUTO_CLK,
     };
     ESP_ERROR_CHECK(ledc_timer_config(&timer_cfg));
 
-    /* 2) The LEDC channel binds a GPIO to that timer and holds the duty value. */
-    ledc_channel_config_t ch_cfg = {
-        .gpio_num   = PWM_GPIO,
-        .speed_mode = PWM_MODE,
-        .channel    = PWM_CHANNEL,
-        .timer_sel  = PWM_TIMER,
-        .duty       = 0,
-        .hpoint     = 0,
-        .intr_type  = LEDC_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ch_cfg));
-}
-
-/* Set PWM duty from a normalised level in [0.0, 1.0]. This is the interface the
- * controller will use later (level = commanded motor effort). */
-static void pwm_set_level(float level)
-{
-    if (level < 0.0f) level = 0.0f;
-    if (level > 1.0f) level = 1.0f;
-    uint32_t duty = (uint32_t)(level * PWM_DUTY_MAX + 0.5f);
-    ledc_set_duty(PWM_MODE, PWM_CHANNEL, duty);
-    ledc_update_duty(PWM_MODE, PWM_CHANNEL);
+    for (int i = 0; i < 2; i++) {
+        ledc_channel_config_t ch = {
+            .gpio_num   = s_motors[i].pwm_gpio,
+            .speed_mode = PWM_MODE,
+            .channel    = s_motors[i].channel,
+            .timer_sel  = MOTOR_PWM_TIMER,
+            .duty       = 0,
+            .hpoint     = 0,
+            .intr_type  = LEDC_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ch));
+        motor_set(i, 0.0f);    /* ensure stopped */
+    }
+    ESP_LOGI(TAG, "motors ready (XY-160D, PWM %d Hz) - L:EN=%d/IN=%d,%d  R:EN=%d/IN=%d,%d",
+             MOTOR_PWM_FREQ_HZ, MOTOR_L_PWM, MOTOR_L_IN1, MOTOR_L_IN2,
+             MOTOR_R_PWM, MOTOR_R_IN1, MOTOR_R_IN2);
 }
 
 static void i2c_init(void)
@@ -372,11 +511,12 @@ static int telemetry_to_json(char *buf, size_t len, const char *type)
 
     return snprintf(buf, len,
         "{\"type\":\"%s\",\"rate\":%d,\"ticks\":%" PRIu32 ",\"dt_avg\":%lld,"
-        "\"dt_min\":%lld,\"dt_max\":%lld,\"duty\":%.3f,"
+        "\"dt_min\":%lld,\"dt_max\":%lld,\"mL\":%.2f,\"mR\":%.2f,"
         "\"imu_ok\":%d,\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
         "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,\"temp\":%.1f}",
         type, CONTROL_HZ, snap.ticks, (long long)snap.dt_avg_us,
-        (long long)snap.dt_min_us, (long long)snap.dt_max_us, snap.duty,
+        (long long)snap.dt_min_us, (long long)snap.dt_max_us,
+        snap.mL, snap.mR,
         snap.imu.ok ? 1 : 0,
         snap.imu.ax, snap.imu.ay, snap.imu.az,
         snap.imu.gx, snap.imu.gy, snap.imu.gz, snap.imu.temp_c);
@@ -414,7 +554,35 @@ static void ws_reply(httpd_req_t *req, const char *text)
 static void handle_command(httpd_req_t *req, const char *cmd)
 {
     if (strcmp(cmd, "help") == 0) {
-        ws_reply(req, "commands: help | stats | stream on | stream off | rollback");
+        ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | "
+                      "stop | stream on | stream off | rollback");
+    } else if (strncmp(cmd, "motor ", 6) == 0) {
+        /* Open-loop test: "motor l 50", "motor r -30", "motor both 40". */
+        char which[8];
+        int pct;
+        if (sscanf(cmd + 6, "%7s %d", which, &pct) != 2) {
+            ws_reply(req, "usage: motor <l|r|both> <-100..100>");
+            return;
+        }
+        if (pct >  100) pct =  100;
+        if (pct < -100) pct = -100;
+        float v = pct / 100.0f;
+        if (strcmp(which, "l") == 0 || strcmp(which, "left") == 0) {
+            s_motor_cmd[0] = v;
+        } else if (strcmp(which, "r") == 0 || strcmp(which, "right") == 0) {
+            s_motor_cmd[1] = v;
+        } else if (strcmp(which, "both") == 0 || strcmp(which, "b") == 0) {
+            s_motor_cmd[0] = s_motor_cmd[1] = v;
+        } else {
+            ws_reply(req, "motor: pick l | r | both");
+            return;
+        }
+        char msg[64];
+        snprintf(msg, sizeof(msg), "motor %s = %d%%", which, pct);
+        ws_reply(req, msg);
+    } else if (strcmp(cmd, "stop") == 0) {
+        s_motor_cmd[0] = s_motor_cmd[1] = 0.0f;
+        ws_reply(req, "motors stopped");
     } else if (strcmp(cmd, "rollback") == 0) {
         /* Switch boot to the other OTA slot (the image we ran before the last
          * upload) and reboot. esp_ota_set_boot_partition validates the slot, so
@@ -483,25 +651,44 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* Broadcast a text frame to every connected WebSocket client. Called from
- * reporter_task on core 0 to stream telemetry. */
-static void ws_broadcast(const char *text)
+/* Runs in the HTTP server task (scheduled via httpd_queue_work). Sends the text
+ * to every WS client. The actual socket send blocks here, NOT in reporter_task,
+ * so a slow/laggy client can't stall telemetry or logging. A client whose send
+ * fails is dropped so it reconnects fresh instead of wedging future sends.
+ * @p arg is a malloc'd, NUL-terminated copy of the payload that we free here. */
+static void ws_async_send(void *arg)
 {
-    if (!s_httpd) return;
+    char *text = (char *)arg;
+    if (!s_httpd) { free(text); return; }
 
     size_t max = CONFIG_LWIP_MAX_SOCKETS;
     int fds[CONFIG_LWIP_MAX_SOCKETS];
-    if (httpd_get_client_list(s_httpd, &max, fds) != ESP_OK) return;
+    if (httpd_get_client_list(s_httpd, &max, fds) != ESP_OK) { free(text); return; }
 
+    httpd_ws_frame_t frame = {
+        .final = true, .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t *)text, .len = strlen(text),
+    };
     for (size_t i = 0; i < max; i++) {
         if (httpd_ws_get_fd_info(s_httpd, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) {
             continue;
         }
-        httpd_ws_frame_t frame = {
-            .final = true, .type = HTTPD_WS_TYPE_TEXT,
-            .payload = (uint8_t *)text, .len = strlen(text),
-        };
-        httpd_ws_send_frame_async(s_httpd, fds[i], &frame);
+        if (httpd_ws_send_frame_async(s_httpd, fds[i], &frame) != ESP_OK) {
+            httpd_sess_trigger_close(s_httpd, fds[i]);   /* drop the wedged client */
+        }
+    }
+    free(text);
+}
+
+/* Hand a telemetry frame to the server task and return immediately. Non-blocking:
+ * reporter_task is never held up by a slow Wi-Fi client. */
+static void ws_broadcast(const char *text)
+{
+    if (!s_httpd) return;
+    char *copy = strdup(text);
+    if (!copy) return;
+    if (httpd_queue_work(s_httpd, ws_async_send, copy) != ESP_OK) {
+        free(copy);   /* couldn't queue - drop this frame rather than leak */
     }
 }
 
@@ -590,6 +777,10 @@ static void start_webserver(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     /* OTA writes flash from inside the server task; give it a bigger stack. */
     cfg.stack_size = 8192;
+    /* Fail a stuck send fast (default ~5 s) so the server task recovers quickly
+     * if a client's link goes bad; and reclaim the oldest socket when full. */
+    cfg.send_wait_timeout = 2;
+    cfg.lru_purge_enable  = true;
     ESP_ERROR_CHECK(httpd_start(&s_httpd, &cfg));
 
     httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_get_handler };
@@ -638,7 +829,6 @@ static void control_task(void *arg)
     int64_t last_us = esp_timer_get_time();
     int64_t dt_min = INT64_MAX, dt_max = 0, dt_sum = 0;
     uint32_t ticks = 0;
-    uint32_t phase = 0;            /* 0..2*FADE_PERIOD_TICKS-1 for up/down sweep */
     imu_t imu = { 0 };             /* latest IMU sample */
 
     for (;;) {
@@ -653,16 +843,10 @@ static void control_task(void *arg)
          * (later: feed imu into the orientation estimate + PID -> "level") */
         imu = mpu6050_read();
 
-        /* Triangle wave: ramp 0->1 over FADE_PERIOD_TICKS, then 1->0. */
-        float level;
-        if (phase < FADE_PERIOD_TICKS) {
-            level = (float)phase / FADE_PERIOD_TICKS;
-        } else {
-            level = 1.0f - (float)(phase - FADE_PERIOD_TICKS) / FADE_PERIOD_TICKS;
-        }
-        if (++phase >= 2 * FADE_PERIOD_TICKS) phase = 0;
-
-        pwm_set_level(level);
+        /* Apply the latest open-loop motor commands (set from the web terminal).
+         * (later: the PID output will drive these instead of a manual command.) */
+        motor_set(0, s_motor_cmd[0]);
+        motor_set(1, s_motor_cmd[1]);
 
         /* Track timing quality. */
         if (dt < dt_min) dt_min = dt;
@@ -679,7 +863,8 @@ static void control_task(void *arg)
                 .dt_avg_us = dt_sum / CONTROL_HZ,
                 .dt_min_us = dt_min,
                 .dt_max_us = dt_max,
-                .duty      = level,
+                .mL        = s_motor_cmd[0],
+                .mR        = s_motor_cmd[1],
                 .imu       = imu,
             };
             xQueueOverwrite(s_telemetry_q, &snap);
@@ -701,10 +886,10 @@ static void reporter_task(void *arg)
             xSemaphoreGive(s_latest_lock);
 
             ESP_LOGI(TAG,
-                     "[core %d] rate=%d Hz dt avg=%lld us (min=%lld max=%lld) duty=%.0f%% ticks=%" PRIu32,
+                     "[core %d] rate=%d Hz dt avg=%lld us (min=%lld max=%lld) mot=[%.0f %.0f]%% ticks=%" PRIu32,
                      xPortGetCoreID(), CONTROL_HZ,
                      (long long)snap.dt_avg_us, (long long)snap.dt_min_us,
-                     (long long)snap.dt_max_us, snap.duty * 100.0f, snap.ticks);
+                     (long long)snap.dt_max_us, snap.mL * 100.0f, snap.mR * 100.0f, snap.ticks);
 
             if (snap.imu.ok) {
                 ESP_LOGI(TAG,
@@ -743,7 +928,8 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    pwm_init();
+    led_init();     /* onboard LED for notifications */
+    motor_init();   /* motors start stopped */
 
     /* Bring up I2C and scan once at boot so we can confirm the IMU is wired. */
     i2c_init();
@@ -775,4 +961,8 @@ void app_main(void)
                             configMAX_PRIORITIES - 2, &s_control_task, 1);
 
     start_control_timer();
+
+    /* Default "alive" notification - replace/extend with your own led_blink()
+     * calls (e.g. error codes, Wi-Fi client connected, OTA in progress). */
+    led_heartbeat();
 }

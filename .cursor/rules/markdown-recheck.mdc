@@ -1,0 +1,16 @@
+---
+description: Always reload markdown files fresh when asked to recheck
+globs: **/*.md
+alwaysApply: false
+---
+
+# Rechecking Markdown Files
+
+The user frequently edits markdown files between turns. When the user asks you
+to "recheck", "re-read", "look again", or otherwise re-evaluate a markdown file:
+
+- ALWAYS reload the file from disk using the Read tool before responding.
+- NEVER rely on previously cached or remembered contents of the file.
+- Treat any earlier version you saw in this conversation as stale.
+
+This guarantees you are working against the user's latest edits.
