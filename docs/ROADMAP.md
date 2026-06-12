@@ -67,7 +67,13 @@ Goal: understand the model before controlling it.
 Goal: validate the model and tune control offline.
 
 - [ ] Build and run the MATLAB simulation
-- [ ] Calibrate the sensor (offsets / bias) - moved here from Phase 3
+
+## Phase 9 - Run real system
+Goal: make the robot stand stably
+
+- [ ] Calibrate the sensor (offsets / bias)
+- [ ] Apply estimation
+- [ ] Apply control
 
 ---
 
