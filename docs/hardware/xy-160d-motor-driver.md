@@ -83,8 +83,8 @@ the **sign** sets the direction pins, the **magnitude** sets the PWM duty.
 ## 4. Wiring to the ESP32 (proposed)
 
 These GPIOs avoid the strapping pins (0, 2, 5, 12, 15), the flash pins (6-11),
-the I2C bus (21/22), and the input-only pins (34-39, reserved for encoders later).
-Adjust to match your wiring; we'll set them as `#define`s in firmware.
+and the I2C bus (21/22). Adjust to match your wiring; they are `#define`s in
+firmware.
 
 | Signal | ESP32 GPIO | Driver pin |
 |--------|-----------|------------|
@@ -95,6 +95,19 @@ Adjust to match your wiring; we'll set them as `#define`s in firmware.
 | Right dir A | GPIO32 | IN3 |
 | Right dir B | GPIO14 | IN4 |
 | Logic ground | GND | GND |
+
+### Wheel encoders (quadrature A/B -> PCNT)
+
+The encoders use **pull-up-capable** GPIOs (not the input-only 34-39, which have
+no internal pull-ups - many encoder outputs are open-collector and need one).
+Each A/B pair drives one PCNT unit configured for 4x decoding.
+
+| Signal | ESP32 GPIO |
+|--------|-----------|
+| Left encoder A | GPIO18 |
+| Left encoder B | GPIO19 |
+| Right encoder A | GPIO23 |
+| Right encoder B | GPIO13 |
 
 ```
                  +-------------------+
@@ -118,9 +131,19 @@ Adjust to match your wiring; we'll set them as `#define`s in firmware.
 
 ## 5. Power & safety notes
 
+- **The inputs are optocoupler-isolated - the `+5V` logic pin MUST be powered.**
+  Unlike an L298N (which makes its own 5V from the motor supply), this board's
+  input/opto side is dead until you feed its `+5V`/`GND` header. Wire driver `+5V`
+  <- ESP32 `5V` (or external 5 V) and driver `GND` <- ESP32 `GND`. **No `+5V` =
+  motors never move, even with perfect signals.** This is the #1 "it doesn't work".
+- **3.3 V is at the bottom of the input range (spec: 3-6.5 V).** It usually works,
+  but if signals are flaky after power/ground are correct, drive the IN/EN pins
+  with 5 V logic (level shifter) or verify the opto actually triggers.
 - **Common ground is mandatory.** ESP32 GND, driver `GND`/`+5V` return, and the
   battery `PGND` must all be tied together, or the logic signals have no reference
   and the motors won't respond (a very common "it doesn't work" cause).
+- **Motor supply must be >= 6.5 V.** The board has undervoltage protection; a 3.7 V
+  or 5 V bench supply on `9-24V` will not spin the motors. Use a real battery/PSU.
 - **Separate the motor supply from the ESP32 supply.** Motors create voltage sags
   and noise spikes that can brown-out or reset the ESP32. Power the ESP32 from USB
   or its own regulator, and the motors from the battery; just share ground.
@@ -137,13 +160,12 @@ Adjust to match your wiring; we'll set them as `#define`s in firmware.
 
 ## 6. Where this fits in the roadmap (Phase 4)
 
-1. **Make a program to test PWM with a real motor** - bring up `ENA`/`IN` pins, spin
-   one motor open-loop from a command.
+1. **Make a program to test PWM with a real motor** (done) - `ENA`/`IN` pins spin
+   each motor open-loop from a `motor <l|r|both> <-100..100>` command.
 2. **Test the real motor** - find direction, deadband, and max usable speed.
-3. **Read encoder using timer** - close the loop on wheel speed (encoders on the
-   reserved input-only pins).
-4. **PC commands** - set PWM / reset encoder count from the web terminal.
+3. **Read encoder** (done) - quadrature A/B into the PCNT hardware counter; total
+   counts + counts/sec stream in telemetry. `enc reset` zeroes them.
+4. **PC commands** - `motor`/`stop` set PWM; `enc reset` clears the count.
 
-> Firmware note: our current `PWM_FREQ_HZ` (5 kHz) was for the onboard LED. When we
-> add motor PWM we'll create separate LEDC channels for `ENA`/`ENB` at a
-> motor-appropriate rate (<= 10 kHz) and keep the LED demo or retire it.
+> Firmware note: motor PWM runs on its own LEDC timer (`LEDC_TIMER_1`) and channels
+> for `ENA`/`ENB` at 10 kHz, separate from the LED pin.

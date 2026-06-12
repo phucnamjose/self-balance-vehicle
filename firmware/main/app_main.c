@@ -1,6 +1,6 @@
 /**
  * @file app_main.c
- * @brief Phase 4 / Step 1 - Open-loop motor test (XY-160D dual H-bridge).
+ * @brief Phase 4 - Open-loop motors (XY-160D) + wheel encoders (PCNT).
  *
  * Architecture:
  *
@@ -34,7 +34,9 @@
  * Wiring the MPU6050 (GY-521 module has its own pull-ups):
  *   VCC -> 3V3, GND -> GND, SDA -> GPIO21, SCL -> GPIO22, AD0 -> GND (addr 0x68).
  *
- * Pins: PWM output on GPIO2 (onboard LED on most DevKits; change if needed).
+ * Motors (XY-160D): L EN=25 IN=26,27   R EN=33 IN=32,14.
+ * Encoders (quadrature A/B): L A=18 B=19   R A=23 B=13 (PCNT, internal pull-ups).
+ * LED/notify: GPIO2 (onboard).
  */
 #include <stdio.h>
 #include <string.h>
@@ -49,6 +51,7 @@
 #include "driver/gptimer.h"
 #include "driver/ledc.h"
 #include "driver/i2c_master.h"
+#include "driver/pulse_cnt.h"   /* PCNT: hardware quadrature encoder counting */
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -120,6 +123,17 @@ static const char *TAG = "balance_bot";
 #define MOTOR_PWM_DUTY_MAX ((1 << 10) - 1)
 #define MOTOR_PWM_FREQ_HZ  10000                  /* XY-160D ceiling is 10 kHz; lower if it whines/heats */
 
+/* --- Quadrature encoders (one per wheel) via the PCNT hardware counter ---
+ * Pins are non-strapping and pull-up capable (free on WROOM & WROVER). Encoder
+ * A/B feed a PCNT unit configured for 4x quadrature decoding. */
+#define ENC_L_A            GPIO_NUM_18
+#define ENC_L_B            GPIO_NUM_19
+#define ENC_R_A            GPIO_NUM_23
+#define ENC_R_B            GPIO_NUM_13
+#define ENC_PCNT_HIGH      30000                  /* rollover limits: count auto-resets here */
+#define ENC_PCNT_LOW       (-30000)               /* and the watch callback accumulates it */
+#define ENC_GLITCH_NS      1000                   /* ignore pulses shorter than 1 us */
+
 static TaskHandle_t s_control_task;
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mpu;       /* MPU6050 device on the I2C bus */
@@ -141,6 +155,15 @@ static const motor_t s_motors[2] = {
  * terminal, applied by control_task each tick. */
 static volatile float s_motor_cmd[2];
 
+/* One encoder. PCNT counts in hardware (16-bit); on each rollover the watch
+ * callback adds the limit to accum, giving a full 64-bit position. */
+typedef struct {
+    pcnt_unit_handle_t unit;
+    volatile int64_t   accum;
+} encoder_t;
+
+static encoder_t s_enc[2];
+
 /* One IMU sample in physical units. */
 typedef struct {
     bool  ok;              /* false if the last read failed */
@@ -156,6 +179,8 @@ typedef struct {
     int64_t  dt_min_us;    /* min/max loop period (jitter) over the window */
     int64_t  dt_max_us;
     float    mL, mR;       /* commanded motor effort, -1..+1 */
+    int64_t  posL, posR;   /* total encoder counts */
+    int32_t  velL, velR;   /* encoder counts/sec over the last window */
     imu_t    imu;          /* latest IMU sample */
 } telemetry_t;
 
@@ -331,6 +356,91 @@ static void motor_init(void)
     ESP_LOGI(TAG, "motors ready (XY-160D, PWM %d Hz) - L:EN=%d/IN=%d,%d  R:EN=%d/IN=%d,%d",
              MOTOR_PWM_FREQ_HZ, MOTOR_L_PWM, MOTOR_L_IN1, MOTOR_L_IN2,
              MOTOR_R_PWM, MOTOR_R_IN1, MOTOR_R_IN2);
+}
+
+/* ===================== Quadrature encoders (PCNT) ===================== */
+
+/* Rollover callback (ISR): the count just hit +/-limit and auto-reset to 0, so
+ * fold that limit into the 64-bit accumulator. */
+static bool IRAM_ATTR enc_on_reach(pcnt_unit_handle_t unit,
+                                   const pcnt_watch_event_data_t *edata, void *user)
+{
+    encoder_t *e = (encoder_t *)user;
+    e->accum += edata->watch_point_value;
+    return false;
+}
+
+/* Configure one PCNT unit for 4x quadrature decoding of an A/B pair. */
+static void encoder_init_one(encoder_t *e, gpio_num_t a, gpio_num_t b)
+{
+    pcnt_unit_config_t unit_cfg = {
+        .high_limit = ENC_PCNT_HIGH,
+        .low_limit  = ENC_PCNT_LOW,
+    };
+    ESP_ERROR_CHECK(pcnt_new_unit(&unit_cfg, &e->unit));
+
+    pcnt_glitch_filter_config_t fcfg = { .max_glitch_ns = ENC_GLITCH_NS };
+    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(e->unit, &fcfg));
+
+    /* Channel A: count edges of A, direction gated by B's level. */
+    pcnt_chan_config_t ca = { .edge_gpio_num = a, .level_gpio_num = b };
+    pcnt_channel_handle_t cha;
+    ESP_ERROR_CHECK(pcnt_new_channel(e->unit, &ca, &cha));
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(cha,
+        PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(cha,
+        PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+
+    /* Channel B: count edges of B, direction gated by A's level (gives 4x). */
+    pcnt_chan_config_t cb = { .edge_gpio_num = b, .level_gpio_num = a };
+    pcnt_channel_handle_t chb;
+    ESP_ERROR_CHECK(pcnt_new_channel(e->unit, &cb, &chb));
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(chb,
+        PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(chb,
+        PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+
+    /* Watch the rollover limits so accum tracks full revolutions. */
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(e->unit, ENC_PCNT_HIGH));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(e->unit, ENC_PCNT_LOW));
+    pcnt_event_callbacks_t cbs = { .on_reach = enc_on_reach };
+    ESP_ERROR_CHECK(pcnt_unit_register_event_callbacks(e->unit, &cbs, e));
+
+    /* Encoder outputs are often open-collector; enable internal pull-ups. */
+    gpio_set_pull_mode(a, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(b, GPIO_PULLUP_ONLY);
+
+    ESP_ERROR_CHECK(pcnt_unit_enable(e->unit));
+    ESP_ERROR_CHECK(pcnt_unit_clear_count(e->unit));
+    ESP_ERROR_CHECK(pcnt_unit_start(e->unit));
+}
+
+static void encoder_init(void)
+{
+    encoder_init_one(&s_enc[0], ENC_L_A, ENC_L_B);
+    encoder_init_one(&s_enc[1], ENC_R_A, ENC_R_B);
+    ESP_LOGI(TAG, "encoders ready (PCNT) - L:A=%d/B=%d  R:A=%d/B=%d",
+             ENC_L_A, ENC_L_B, ENC_R_A, ENC_R_B);
+}
+
+/* Total position = accumulator + current hardware count. Retry if a rollover
+ * lands between the two reads so we never mix an old accum with a new count. */
+static int64_t encoder_count(int i)
+{
+    int64_t a0, a1;
+    int cur = 0;
+    do {
+        a0 = s_enc[i].accum;
+        pcnt_unit_get_count(s_enc[i].unit, &cur);
+        a1 = s_enc[i].accum;
+    } while (a0 != a1);
+    return a1 + cur;
+}
+
+static void encoder_reset(int i)
+{
+    s_enc[i].accum = 0;
+    pcnt_unit_clear_count(s_enc[i].unit);
 }
 
 static void i2c_init(void)
@@ -512,11 +622,14 @@ static int telemetry_to_json(char *buf, size_t len, const char *type)
     return snprintf(buf, len,
         "{\"type\":\"%s\",\"rate\":%d,\"ticks\":%" PRIu32 ",\"dt_avg\":%lld,"
         "\"dt_min\":%lld,\"dt_max\":%lld,\"mL\":%.2f,\"mR\":%.2f,"
+        "\"posL\":%lld,\"posR\":%lld,\"velL\":%ld,\"velR\":%ld,"
         "\"imu_ok\":%d,\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
         "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,\"temp\":%.1f}",
         type, CONTROL_HZ, snap.ticks, (long long)snap.dt_avg_us,
         (long long)snap.dt_min_us, (long long)snap.dt_max_us,
         snap.mL, snap.mR,
+        (long long)snap.posL, (long long)snap.posR,
+        (long)snap.velL, (long)snap.velR,
         snap.imu.ok ? 1 : 0,
         snap.imu.ax, snap.imu.ay, snap.imu.az,
         snap.imu.gx, snap.imu.gy, snap.imu.gz, snap.imu.temp_c);
@@ -525,7 +638,7 @@ static int telemetry_to_json(char *buf, size_t len, const char *type)
 /* Kept so `curl http://192.168.4.1/api/telemetry` still works for quick checks. */
 static esp_err_t telemetry_get_handler(httpd_req_t *req)
 {
-    char json[384];
+    char json[512];
     int n = telemetry_to_json(json, sizeof(json), "telemetry");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n);
@@ -555,7 +668,11 @@ static void handle_command(httpd_req_t *req, const char *cmd)
 {
     if (strcmp(cmd, "help") == 0) {
         ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | "
-                      "stop | stream on | stream off | rollback");
+                      "stop | enc reset | stream on | stream off | rollback");
+    } else if (strcmp(cmd, "enc reset") == 0) {
+        encoder_reset(0);
+        encoder_reset(1);
+        ws_reply(req, "encoder counts reset to 0");
     } else if (strncmp(cmd, "motor ", 6) == 0) {
         /* Open-loop test: "motor l 50", "motor r -30", "motor both 40". */
         char which[8];
@@ -610,7 +727,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         vTaskDelay(pdMS_TO_TICKS(500));   /* let the reply flush */
         esp_restart();
     } else if (strcmp(cmd, "stats") == 0) {
-        char json[384];
+        char json[512];
         telemetry_to_json(json, sizeof(json), "resp_stats");
         ws_send_text(req, json);
     } else if (strcmp(cmd, "stream on") == 0) {
@@ -830,6 +947,7 @@ static void control_task(void *arg)
     int64_t dt_min = INT64_MAX, dt_max = 0, dt_sum = 0;
     uint32_t ticks = 0;
     imu_t imu = { 0 };             /* latest IMU sample */
+    int64_t pos_last[2] = { 0 };   /* encoder counts at the previous report */
 
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -858,6 +976,9 @@ static void control_task(void *arg)
          * window. xQueueOverwrite never blocks, so the control loop stays lean -
          * the slow logging/networking happens on the other core. */
         if (ticks % CONTROL_HZ == 0) {
+            /* The window is exactly 1 s, so delta counts == counts/sec. */
+            int64_t posL = encoder_count(0);
+            int64_t posR = encoder_count(1);
             telemetry_t snap = {
                 .ticks     = ticks,
                 .dt_avg_us = dt_sum / CONTROL_HZ,
@@ -865,8 +986,14 @@ static void control_task(void *arg)
                 .dt_max_us = dt_max,
                 .mL        = s_motor_cmd[0],
                 .mR        = s_motor_cmd[1],
+                .posL      = posL,
+                .posR      = posR,
+                .velL      = (int32_t)(posL - pos_last[0]),
+                .velR      = (int32_t)(posR - pos_last[1]),
                 .imu       = imu,
             };
+            pos_last[0] = posL;
+            pos_last[1] = posR;
             xQueueOverwrite(s_telemetry_q, &snap);
             dt_min = INT64_MAX; dt_max = 0; dt_sum = 0;
         }
@@ -891,6 +1018,11 @@ static void reporter_task(void *arg)
                      (long long)snap.dt_avg_us, (long long)snap.dt_min_us,
                      (long long)snap.dt_max_us, snap.mL * 100.0f, snap.mR * 100.0f, snap.ticks);
 
+            ESP_LOGI(TAG,
+                     "         enc posL=%lld posR=%lld  vel=[%ld %ld] cnt/s",
+                     (long long)snap.posL, (long long)snap.posR,
+                     (long)snap.velL, (long)snap.velR);
+
             if (snap.imu.ok) {
                 ESP_LOGI(TAG,
                          "         IMU a=[%+.2f %+.2f %+.2f]g g=[%+.1f %+.1f %+.1f]dps %.1fC",
@@ -902,7 +1034,7 @@ static void reporter_task(void *arg)
 
             /* Stream to any connected WebSocket terminals. */
             if (s_stream_enabled) {
-                char json[384];
+                char json[512];
                 telemetry_to_json(json, sizeof(json), "telemetry");
                 ws_broadcast(json);
             }
@@ -930,6 +1062,7 @@ void app_main(void)
 
     led_init();     /* onboard LED for notifications */
     motor_init();   /* motors start stopped */
+    encoder_init(); /* PCNT quadrature counters, count from 0 */
 
     /* Bring up I2C and scan once at boot so we can confirm the IMU is wired. */
     i2c_init();

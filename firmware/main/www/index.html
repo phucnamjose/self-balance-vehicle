@@ -51,6 +51,12 @@
     <span class="k">motor L:</span> <span class="v" id="mL">--</span> &nbsp;
     <span class="k">motor R:</span> <span class="v" id="mR">--</span>
   </div>
+  <div style="margin-top:6px">
+    <span class="k">enc L:</span> <span class="v" id="posL">--</span> &nbsp;
+    <span class="k">enc R:</span> <span class="v" id="posR">--</span> &nbsp;
+    <span class="k">vel (cnt/s):</span> <span class="v" id="vel">--</span> &nbsp;
+    <button onclick="send('enc reset')">reset enc</button>
+  </div>
 
   <div id="motors">
     <span class="k">motor test:</span>
@@ -113,6 +119,11 @@
         mL.textContent = (d.mL * 100).toFixed(0) + '%';
         mR.textContent = (d.mR * 100).toFixed(0) + '%';
       }
+      if (d.posL !== undefined) {
+        posL.textContent = d.posL;
+        posR.textContent = d.posR;
+        vel.textContent = `${d.velL} ${d.velR}`;
+      }
     }
 
     function connect() {
@@ -130,7 +141,8 @@
               ? ` a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
               : ' imu:off';
             const mot = ` mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]%`;
-            add(`${ts}  ticks=${d.ticks} dt=${d.dt_avg}us(min ${d.dt_min}/max ${d.dt_max})${mot}${imu}`);
+            const enc = ` enc=[${d.posL} ${d.posR}] vel=[${d.velL} ${d.velR}]`;
+            add(`${ts}  ticks=${d.ticks} dt=${d.dt_avg}us(min ${d.dt_min}/max ${d.dt_max})${mot}${enc}${imu}`);
           }
         } else if (d.type === 'resp_stats') {
           setValues(d);

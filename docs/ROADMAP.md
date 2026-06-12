@@ -6,8 +6,9 @@ example, verify it on hardware, check it off, and write a short note.
 
 Status legend: `[ ]` todo &nbsp; `[~]` in progress &nbsp; `[x]` done
 
-> Current focus: **Phase 4 - Step 2: test the real motor** (direction, deadband, max speed).
-> Open-loop driver is in: `motor <l|r|both> <-100..100>` / `stop` from the web terminal.
+> Current focus: **Phase 4 - encoders** are reading (PCNT). Next: drive the motors and
+> confirm encoder sign matches the spin direction, then characterize deadband/max speed.
+> Web terminal: `motor <l|r|both> <-100..100>` / `stop` / `enc reset`.
 > Code: `firmware/main/app_main.c`, `www/index.html`. Driver doc: `docs/hardware/xy-160d-motor-driver.md`.
 
 ---
@@ -40,8 +41,8 @@ Goal: drive the real motors and command them remotely.
 
 - [x] Test PWM with 2 real motors
 - [~] Add a PC command to test the motor (direction, deadband, max speed)
-- [ ] Read encoder using timer
-- [ ] Add a PC command to reset encoder count
+- [x] Read encoder using timer - PCNT hardware counter (4x quadrature)
+- [x] Add a PC command to reset encoder count - `enc reset`
 
 ## Phase 5 - Build basic web app: states + log
 Goal: a dashboard to observe and poke the robot.
@@ -83,6 +84,10 @@ learned, where the code lives.
 
 | Date | Phase / Step | Notes |
 |------|--------------|-------|
+| 2026-06-13 | P4 (done) | Both motors confirmed working on hardware. Root cause of the earlier "doesn't work": the XY-160D inputs are optocoupler-isolated, so its +5V logic pin must be powered (+ common ground); documented in the driver md. |
+| 2026-06-13 | docs | Added docs/hardware/gb37-520-dc-motor.md: GB37-520 12V 30:1 gear motor specs, the 2-ch Hall encoder (11 PPR/ch -> 1320 counts/wheel-rev at our 4x PCNT decoding), counts<->RPM/position formulas, 6-wire colour pinout (encoder powered from 3V3 for 3.3V-safe signals), and the L/R GPIO mapping. |
+| 2026-06-13 | docs | Added docs/hardware/esp32-board.md: intro to the ESP32 DevKit (WROOM-32, 4 MB), specs, power rules, the full project GPIO map, the complete 38-pin WROOM-32 DevKit pinout (ASCII header diagram verified against the real board + full GPIO function reference) annotated with our usage, pin gotchas (strapping, input-only, 16/17 PSRAM, ADC2+Wi-Fi), flashing/OTA, and which peripheral driver does what. Fixed an earlier wrong right-column order (top-right is GND, not GPIO23; two GNDs on the right; GPIO6 at bottom-right). |
+| 2026-06-12 | P4 S3 | Read both wheel encoders with the **PCNT** hardware counter (one unit per wheel, 4x quadrature: A/B each gate the other). Counts in hardware = ~0 CPU. 16-bit counter rolls over at +/-30000 into a 64-bit accum via a watch-point ISR; `encoder_count()` retries across the accum/count read to avoid the rollover race. Pins L:A=18/B=19 R:A=23/B=13 (non-strapping, internal pull-ups on; encoders are often open-collector). Telemetry gained posL/posR (total) + velL/velR (counts/sec over the 1 s window); shown on web + serial. New WS command `enc reset`. Reused the existing timer/task structure - encoders are read once per report in control_task. |
 | 2026-06-12 | P2 (fix) | Fixed WS lag/`error in send: 11`: the blocking `httpd_ws_send_frame_async` ran inside reporter_task, so a slow client stalled it ~5 s (logs+web only updated every ~6 s). Now reporter strdups the frame and `httpd_queue_work`s it to the server task (non-blocking); failed sends drop the client (`httpd_sess_trigger_close`). Also `send_wait_timeout=2`, `lru_purge_enable=true`. Control loop was never affected. |
 | 2026-06-12 | P4 S1 | Dropped the LED PWM fade demo; GPIO2 is now a plain output (led_init/led_set) reserved for notification blinks. Removed the obsolete "duty" telemetry field everywhere (motors' mL/mR are the real actuator readout now). |
 | 2026-06-12 | P4 S1 | Open-loop motor driver: motor_init() sets up 2 LEDC PWM channels (ENA/ENB on GPIO25/33, timer 1, 10 kHz) + 4 direction GPIOs (26/27/32/14). motor_set(i,cmd) maps sign->dir, magnitude->duty. control_task applies s_motor_cmd[] each tick. Web terminal: "motor <l|r|both> <-100..100>" / "stop", plus a slider+STOP panel and mot=[L R]% in telemetry. Motors start stopped. |
