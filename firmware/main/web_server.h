@@ -1,0 +1,22 @@
+/**
+ * @file web_server.h
+ * @brief HTTP + WebSocket server, command terminal and wireless OTA.
+ *
+ *   /     : serves the embedded web page (www/index.html)
+ *   /ws   : full-duplex channel - server streams telemetry JSON, browser sends
+ *           text commands (help/stats/motor/stop/enc reset/stream/rollback)
+ *   /ota  : POST a new .bin; written to the spare app slot, then reboot.
+ */
+#pragma once
+
+#include <stdbool.h>
+
+/* Start the HTTP server and register the /, /api/telemetry, /ws and /ota URIs. */
+void start_webserver(void);
+
+/* Broadcast a text frame to all connected WebSocket clients. Non-blocking:
+ * the actual socket send happens in the server task, not the caller's. */
+void ws_broadcast(const char *text);
+
+/* Whether telemetry streaming to WebSocket clients is currently enabled. */
+bool web_server_streaming(void);
