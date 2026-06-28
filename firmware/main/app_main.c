@@ -36,7 +36,7 @@
  *
  * Motors (XY-160D): L EN=25 IN=26,27   R EN=33 IN=32,14.
  * Encoders (quadrature A/B): L A=18 B=19   R A=23 B=13 (PCNT, internal pull-ups).
- * LED/notify: GPIO2 (onboard).
+ * LEDs/notify: Left=GPIO17, Right=GPIO16.
  */
 #include <stdio.h>
 #include <string.h>
@@ -98,7 +98,8 @@ static const char *TAG = "balance_bot";
  * stalling the control loop for 100 ms. */
 #define MPU_I2C_TIMEOUT_MS     4
 
-#define LED_GPIO       GPIO_NUM_2                 /* onboard LED - notification blink */
+#define LED_L_GPIO     GPIO_NUM_17                /* Left LED  - notification blink */
+#define LED_R_GPIO     GPIO_NUM_16                /* Right LED - notification blink */
 
 #define CONTROL_HZ     200                       /* control loop rate */
 #define TIMER_RES_HZ   1000000                   /* 1 MHz -> 1 tick = 1 us */
@@ -208,7 +209,8 @@ static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
 
 /* ===================== Notification LED (non-blocking) ===================== */
 
-/* A tiny task owns the onboard LED (GPIO2). Callers post a blink pattern to a
+/* A tiny task owns the Left/Right LEDs (GPIO17/GPIO16), driven together. Callers
+ * post a blink pattern to a
  * 1-slot mailbox and return immediately - no delays in the caller's context.
  * A new request always preempts the one in progress. */
 typedef struct {
@@ -219,7 +221,10 @@ typedef struct {
 
 static QueueHandle_t s_led_q;
 
-static inline void led_set(bool on) { gpio_set_level(LED_GPIO, on ? 1 : 0); }
+static inline void led_set(bool on) {
+    gpio_set_level(LED_L_GPIO, on ? 1 : 0);
+    gpio_set_level(LED_R_GPIO, on ? 1 : 0);
+}
 
 /* Non-blocking. Examples:
  *   led_blink(60, 60, 3)     -> three quick blinks, then off
@@ -283,10 +288,10 @@ static void led_init(void)
 {
     gpio_config_t io = {
         .mode         = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << LED_GPIO),
+        .pin_bit_mask = ((1ULL << LED_L_GPIO) | (1ULL << LED_R_GPIO)),
     };
     ESP_ERROR_CHECK(gpio_config(&io));
-    gpio_set_level(LED_GPIO, 0);
+    led_set(false);
 
     s_led_q = xQueueCreate(1, sizeof(led_pattern_t));
     configASSERT(s_led_q);
@@ -1060,7 +1065,7 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    led_init();     /* onboard LED for notifications */
+    led_init();     /* Left/Right LEDs for notifications */
     motor_init();   /* motors start stopped */
     encoder_init(); /* PCNT quadrature counters, count from 0 */
 

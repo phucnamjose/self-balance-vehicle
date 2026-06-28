@@ -49,9 +49,10 @@ Our committed pin allocation. Anything not listed is free for later use.
 | GPIO | Used for | Notes |
 |------|----------|-------|
 | 0 | BOOT button | Strapping pin; also the boot-mode select |
-| 2 | Onboard LED / notify | Strapping pin; plain digital out |
 | 13 | Right encoder B | Pull-up capable |
 | 14 | Motor R IN4 (dir) | Direction output |
+| 16 | Right LED / notify | Plain digital out |
+| 17 | Left LED / notify | Plain digital out |
 | 18 | Left encoder A | Pull-up capable |
 | 19 | Left encoder B | Pull-up capable |
 | 21 | I2C SDA | To MPU6050 |
@@ -68,14 +69,14 @@ Our committed pin allocation. Anything not listed is free for later use.
 ### Pin gotchas
 
 - **Strapping pins** (0, 2, 5, 12, 15): their level at boot selects boot mode and
-  flash voltage. Avoid driving 12 and 15 externally at reset; 0 and 2 are fine as
-  the BOOT button and onboard LED.
+  flash voltage. Avoid driving 12 and 15 externally at reset; 0 is fine as the
+  BOOT button. GPIO2 is now free (no longer used for the onboard LED).
 - **Input-only pins** (34, 35, 36, 39): no output drivers **and no internal
   pull-ups/pull-downs**. We avoided them for encoders because open-collector
   encoder outputs need a pull-up - regular GPIOs (13/18/19/23) give us that for
   free.
-- **GPIO16 / 17**: free on WROOM, but used for PSRAM on WROVER modules. We don't
-  use them, so either module works.
+- **GPIO16 / 17**: free on WROOM, but used for PSRAM on WROVER modules. We drive
+  the Right (16) and Left (17) notification LEDs here, so use a WROOM module.
 - All pins are **3.3 V**. Anything feeding a GPIO (sensor, encoder) must use 3.3 V
   logic or be level-shifted.
 
@@ -102,11 +103,11 @@ Our project's use is shown next to each pin.
         GPIO33  R PWM        8          31   GPIO19  L enc B
         GPIO25  L PWM        9          30   GPIO18  L enc A
         GPIO26  L IN1       10          29   GPIO5   *strap
-        GPIO27  L IN2       11          28   GPIO17
-        GPIO14  R IN4       12          27   GPIO16
+        GPIO27  L IN2       11          28   GPIO17  L LED
+        GPIO14  R IN4       12          27   GPIO16  R LED
         GPIO12  *strap      13          26   GPIO4
         GND                 14          25   GPIO0   *strap (BOOT)
-        GPIO13  R enc B     15          24   GPIO2   *strap (LED)
+        GPIO13  R enc B     15          24   GPIO2   *strap
         GPIO9   flash       16          23   GPIO15  *strap
         GPIO10  flash       17          22   GPIO8   flash
         GPIO11  flash       18          21   GPIO7   flash
