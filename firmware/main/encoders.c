@@ -1,5 +1,6 @@
 #include "encoders.h"
 
+#include <math.h>
 #include "driver/gpio.h"
 #include "driver/pulse_cnt.h"   /* PCNT: hardware quadrature encoder counting */
 #include "esp_log.h"
@@ -118,4 +119,17 @@ void encoder_reset(int i)
 {
     s_enc[i].accum = 0;
     pcnt_unit_clear_count(s_enc[i].unit);
+}
+
+/* radians per encoder count (one full revolution = 2*pi over the counts/rev). */
+#define ENC_RAD_PER_COUNT   (2.0 * M_PI / ENC_COUNTS_PER_WHEEL_REV)
+
+double encoder_angle_rad(int i)
+{
+    return (double)encoder_count(i) * ENC_RAD_PER_COUNT;
+}
+
+float encoder_cps_to_radps(int32_t counts_per_sec)
+{
+    return (float)(counts_per_sec * ENC_RAD_PER_COUNT);
 }
