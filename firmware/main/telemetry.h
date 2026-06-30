@@ -2,9 +2,12 @@
  * @file telemetry.h
  * @brief Shared loop-state types and the cached snapshot used by the web server.
  *
- * The control loop produces a telemetry_t each second; the reporter caches the
- * latest one here (guarded by a mutex) so HTTP/WebSocket handlers on the other
- * core can read it and serialize it to JSON.
+ * The control loop writes one sample_t every tick into a double buffer and
+ * checks each tick's measured period against the limits below, flagging a
+ * warning if it runs long or short. After SAMPLES_PER_BATCH samples (0.5 s) it
+ * swaps buffers and hands the full one to the reporter task, which emits any
+ * pending timing warning, caches the latest sample for HTTP/WebSocket readers,
+ * and streams the whole batch to the browser to be saved as a file.
  */
 #pragma once
 
@@ -15,6 +18,17 @@
 /* Control loop rate (Hz). Shared because telemetry tags each frame with it. */
 #define CONTROL_HZ     200
 
+/* Nominal loop period and how many samples make up one reported batch. At
+ * 200 Hz a half-second batch is 100 samples. */
+#define CONTROL_PERIOD_US   (1000000 / CONTROL_HZ)
+#define SAMPLES_PER_BATCH   (CONTROL_HZ / 2)
+
+/* Timing limits for the warning job (tunable). The control loop warns when a
+ * tick's measured period runs longer than DT_MAX_WARN_US or shorter than
+ * DT_MIN_WARN_US. */
+#define DT_MAX_WARN_US (CONTROL_PERIOD_US * 7 / 5)                   /* +40% */
+#define DT_MIN_WARN_US (CONTROL_PERIOD_US * 3 / 5)                   /* -40% */
+
 /* One IMU sample in physical units. */
 typedef struct {
     bool  ok;              /* false if the last read failed */
@@ -23,24 +37,35 @@ typedef struct {
     float temp_c;          /* die temperature in degC */
 } imu_t;
 
-/* Snapshot of loop state, produced by control_task and consumed by reporter_task. */
+/* One per-tick sample, produced by control_task at CONTROL_HZ. */
 typedef struct {
-    uint32_t ticks;        /* total control ticks so far */
-    int64_t  dt_avg_us;    /* average loop period over the last window */
-    int64_t  dt_min_us;    /* min/max loop period (jitter) over the window */
-    int64_t  dt_max_us;
-    float    mL, mR;       /* commanded motor effort, -1..+1 */
-    int64_t  posL, posR;   /* total encoder counts */
-    int32_t  velL, velR;   /* encoder counts/sec over the last window */
-    imu_t    imu;          /* latest IMU sample */
-} telemetry_t;
+    int64_t t_us;          /* esp_timer_get_time() at this tick (real time) */
+    float   posL, posR;    /* wheel angle, radians */
+    float   velL, velR;    /* wheel angular speed, rad/s */
+    float   mL, mR;        /* commanded motor effort, -1..+1 */
+    imu_t   imu;           /* latest IMU sample */
+} sample_t;
 
-/* Create the mutex guarding the cached snapshot. Call once at boot. */
+/* Create the mutex guarding the cached latest sample. Call once at boot. */
 void telemetry_init(void);
 
-/* Replace the cached snapshot (called by the reporter task). */
-void telemetry_set(const telemetry_t *snap);
+/* Replace the cached latest sample (called by the reporter task). */
+void telemetry_set_latest(const sample_t *s);
 
-/* Serialize the cached snapshot to JSON. @p type tags the message so the client
- * can tell telemetry from command replies. Returns the string length. */
-int telemetry_to_json(char *buf, size_t len, const char *type);
+/* Serialize the cached latest sample to JSON. @p type tags the message so the
+ * client can tell telemetry from command replies. Returns the string length. */
+int telemetry_latest_json(char *buf, size_t len, const char *type);
+
+/* Telemetry is split into named topics (imu / angles / motors), each a
+ * projection of sample_t with its own column set. The reporter streams one
+ * frame per topic so the client can record each to its own file. */
+int         telemetry_topic_count(void);
+const char *telemetry_topic_name(int topic);
+
+/* Serialize @p n samples of topic @p topic to a compact frame:
+ *   {"type":"telemetry_batch","topic":"<name>","rows":[[..],..]}
+ * Rows are bare numeric arrays (keys omitted to stay small); the column order
+ * is documented next to each topic's encoder in telemetry.c and mirrored on the
+ * client. Returns the string length, or a negative value if it would not fit. */
+int telemetry_topic_json(char *buf, size_t len, int topic,
+                         const sample_t *samples, int n);

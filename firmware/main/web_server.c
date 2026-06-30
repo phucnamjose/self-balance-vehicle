@@ -40,7 +40,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 static esp_err_t telemetry_get_handler(httpd_req_t *req)
 {
     char json[512];
-    int n = telemetry_to_json(json, sizeof(json), "telemetry");
+    int n = telemetry_latest_json(json, sizeof(json), "telemetry");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, n);
 }
@@ -131,7 +131,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         esp_restart();
     } else if (strcmp(cmd, "stats") == 0) {
         char json[512];
-        telemetry_to_json(json, sizeof(json), "resp_stats");
+        telemetry_latest_json(json, sizeof(json), "resp_stats");
         ws_send_text(req, json);
     } else if (strcmp(cmd, "stream on") == 0) {
         s_stream_enabled = true;

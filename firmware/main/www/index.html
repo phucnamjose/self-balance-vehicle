@@ -17,6 +17,7 @@
     .cmd { color: #6ea8fe; }
     .resp { color: #22c55e; }
     .sys { color: #8b96a5; }
+    .warn { color: #f59e0b; }
     #bar { display: flex; gap: 8px; margin-top: 8px; }
     #in { flex: 1; background: #0f141b; border: 1px solid #2a3340; color: #e6edf3;
           border-radius: 8px; padding: 8px; font-family: monospace; }
@@ -37,10 +38,7 @@
 <body>
   <h1><span id="dot" class="dot"></span>Balance Bot - terminal</h1>
   <div>
-    <span class="k">rate:</span> <span class="v" id="rate">--</span> Hz &nbsp;
-    <span class="k">dt avg:</span> <span class="v" id="avg">--</span> us &nbsp;
-    <span class="k">min:</span> <span class="v" id="min">--</span> &nbsp;
-    <span class="k">max:</span> <span class="v" id="max">--</span>
+    <span class="k">rate:</span> <span class="v" id="rate">--</span> Hz
   </div>
   <div style="margin-top:6px">
     <span class="k">accel (g):</span> <span class="v" id="acc">--</span> &nbsp;
@@ -52,9 +50,9 @@
     <span class="k">motor R:</span> <span class="v" id="mR">--</span>
   </div>
   <div style="margin-top:6px">
-    <span class="k">enc L:</span> <span class="v" id="posL">--</span> &nbsp;
-    <span class="k">enc R:</span> <span class="v" id="posR">--</span> &nbsp;
-    <span class="k">vel (cnt/s):</span> <span class="v" id="vel">--</span> &nbsp;
+    <span class="k">enc L (rad):</span> <span class="v" id="posL">--</span> &nbsp;
+    <span class="k">enc R (rad):</span> <span class="v" id="posR">--</span> &nbsp;
+    <span class="k">vel (rad/s):</span> <span class="v" id="vel">--</span> &nbsp;
     <button onclick="send('enc reset')">reset enc</button>
   </div>
 
@@ -69,6 +67,17 @@
     <span id="mvallbl" class="v">0%</span>
     <button onclick="applyMotor()">Apply</button>
     <button class="stopbtn" onclick="send('stop')">STOP</button>
+  </div>
+
+  <div id="rec" style="margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+    <span class="k">data log:</span>
+    <select id="rectopic">
+      <option value="imu">imu</option>
+      <option value="angles">angles</option>
+      <option value="motors">motors</option>
+    </select>
+    <button id="recbtn" onclick="toggleRecord()">Record to file</button>
+    <span id="recstat" class="sys">idle</span>
   </div>
 
   <div id="term"></div>
@@ -89,7 +98,7 @@
     const term = document.getElementById('term');
     const dot = document.getElementById('dot');
     const input = document.getElementById('in');
-    let ws, lastTicks = -1;
+    let ws;
 
     function add(text, cls) {
       const span = document.createElement('span');
@@ -103,27 +112,46 @@
     const f2 = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
     const f1 = (x) => (x >= 0 ? '+' : '') + x.toFixed(1);
 
+    /* Each field updates independently so a per-topic frame (which carries only
+     * some of them) refreshes just its own part of the dashboard. */
     function setValues(d) {
-      rate.textContent = d.rate;
-      avg.textContent = d.dt_avg;
-      min.textContent = d.dt_min;
-      max.textContent = d.dt_max;
-      if (d.imu_ok) {
-        acc.textContent = `${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}`;
-        gyr.textContent = `${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}`;
-        temp.textContent = d.temp.toFixed(1);
-      } else {
-        acc.textContent = gyr.textContent = temp.textContent = 'no IMU';
+      if (d.rate !== undefined) rate.textContent = d.rate;
+      if (d.imu_ok !== undefined) {
+        if (d.imu_ok) {
+          acc.textContent = `${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}`;
+          gyr.textContent = `${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}`;
+          temp.textContent = d.temp.toFixed(1);
+        } else {
+          acc.textContent = gyr.textContent = temp.textContent = 'no IMU';
+        }
       }
       if (d.mL !== undefined) {
         mL.textContent = (d.mL * 100).toFixed(0) + '%';
         mR.textContent = (d.mR * 100).toFixed(0) + '%';
       }
       if (d.posL !== undefined) {
-        posL.textContent = d.posL;
-        posR.textContent = d.posR;
-        vel.textContent = `${d.velL} ${d.velR}`;
+        posL.textContent = d.posL.toFixed(3);
+        posR.textContent = d.posR.toFixed(3);
       }
+      if (d.velL !== undefined) {
+        vel.textContent = `${f2(d.velL)} ${f2(d.velR)}`;
+      }
+    }
+
+    /* Column order of each telemetry topic's rows. This MUST match the per-topic
+     * encoders in telemetry.c (telemetry_topic_json) - frames omit the keys to
+     * stay small, so both ends hardcode the order. */
+    const TOPICS = {
+      imu:    ['t', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp', 'ok'],
+      angles: ['t', 'roll', 'pitch', 'roll_sp', 'pitch_sp'],
+      motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR'],
+    };
+
+    /* Turn one batch row into a flat object keyed by the topic's columns. */
+    function rowToObj(cols, row) {
+      const o = {};
+      for (let i = 0; i < cols.length; i++) o[cols[i]] = row[i];
+      return o;
     }
 
     function connect() {
@@ -132,25 +160,113 @@
       ws.onclose = () => { dot.classList.remove('on'); add('disconnected - retrying...', 'sys'); setTimeout(connect, 1500); };
       ws.onmessage = (ev) => {
         let d; try { d = JSON.parse(ev.data); } catch (e) { add(ev.data); return; }
-        if (d.type === 'telemetry') {
+        if (d.type === 'telemetry_batch') {
+          onBatch(d);
+        } else if (d.type === 'telemetry') {
           setValues(d);
-          if (d.ticks !== lastTicks) {
-            lastTicks = d.ticks;
-            const ts = new Date().toLocaleTimeString();
-            const imu = d.imu_ok
-              ? ` a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
-              : ' imu:off';
-            const mot = ` mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]%`;
-            const enc = ` enc=[${d.posL} ${d.posR}] vel=[${d.velL} ${d.velR}]`;
-            add(`${ts}  ticks=${d.ticks} dt=${d.dt_avg}us(min ${d.dt_min}/max ${d.dt_max})${mot}${enc}${imu}`);
-          }
         } else if (d.type === 'resp_stats') {
           setValues(d);
-          add(`stats: rate=${d.rate}Hz dt_avg=${d.dt_avg}us min=${d.dt_min} max=${d.dt_max} mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]%`, 'resp');
+          const imu = d.imu_ok
+            ? ` imu a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
+            : ' imu:off';
+          add(`stats: rate=${d.rate}Hz mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]% ` +
+              `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}`, 'resp');
+        } else if (d.type === 'warn') {
+          add('WARN: ' + d.text, 'warn');
         } else if (d.type === 'resp') {
           add(d.text, 'resp');
         }
       };
+    }
+
+    /* A telemetry_batch carries a topic + rows[] in that topic's column order.
+     * Refresh the matching part of the dashboard from the last row, and (if we
+     * are recording this topic) append its rows to the CSV. */
+    function onBatch(d) {
+      const cols = TOPICS[d.topic];
+      if (!cols) return;
+      if (d.rows && d.rows.length) {
+        const last = rowToObj(cols, d.rows[d.rows.length - 1]);
+        if (d.topic === 'imu') {
+          setValues({ imu_ok: !!last.ok, ax: last.ax, ay: last.ay, az: last.az,
+                      gx: last.gx, gy: last.gy, gz: last.gz, temp: last.temp });
+        } else if (d.topic === 'motors') {
+          setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR });
+        }
+        /* 'angles' has no live readout yet (values are null until estimation). */
+      }
+      if (recording && d.topic === recTopic) writeBatch(d, cols);
+    }
+
+    /* ---- recording the telemetry stream to a CSV file ----
+     * Prefer the File System Access API (streams straight to disk); fall back to
+     * accumulating in memory and downloading when recording stops. */
+    let recording = false, fileWriter = null, csvHeader = null, memRows = [], recName = '', recTopic = '';
+    const recstat = (t) => { document.getElementById('recstat').textContent = t; };
+
+    /* Build a "topic_YYYYMMDD_HHMMSS.csv" name from the current local time. */
+    function recordFilename(topic) {
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, '0');
+      const date = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+      const time = `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+      return `${topic}_${date}_${time}.csv`;
+    }
+
+    function batchToCsv(d, cols) {
+      let out = '';
+      if (csvHeader === null) { csvHeader = cols.join(','); out += csvHeader + '\n'; }
+      for (const r of d.rows) out += r.join(',') + '\n';
+      return out;
+    }
+
+    async function writeBatch(d, cols) {
+      const text = batchToCsv(d, cols);
+      if (fileWriter) {
+        try { await fileWriter.write(text); } catch (e) { recstat('write error: ' + e.message); }
+      } else {
+        memRows.push(text);
+      }
+    }
+
+    async function toggleRecord() {
+      if (recording) { await stopRecord(); return; }
+      csvHeader = null; memRows = []; fileWriter = null;
+      recTopic = document.getElementById('rectopic').value;
+      recName = recordFilename(recTopic);
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await showSaveFilePicker({
+            suggestedName: recName,
+            types: [{ description: 'CSV', accept: { 'text/csv': ['.csv'] } }],
+          });
+          fileWriter = await handle.createWritable();
+        } catch (e) { recstat('cancelled'); return; }
+      }
+      recording = true;
+      document.getElementById('rectopic').disabled = true;
+      document.getElementById('recbtn').textContent = 'Stop recording';
+      recstat(fileWriter ? `recording '${recTopic}' to file...` : `recording '${recTopic}' (in-memory)...`);
+    }
+
+    async function stopRecord() {
+      recording = false;
+      document.getElementById('rectopic').disabled = false;
+      document.getElementById('recbtn').textContent = 'Record to file';
+      if (fileWriter) {
+        try { await fileWriter.close(); } catch (e) {}
+        fileWriter = null;
+        recstat('saved');
+        return;
+      }
+      const blob = new Blob(memRows, { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = recName || recordFilename(recTopic || 'telemetry');
+      a.click();
+      URL.revokeObjectURL(a.href);
+      memRows = [];
+      recstat('downloaded');
     }
 
     function send(cmd) {
