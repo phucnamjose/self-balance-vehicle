@@ -18,9 +18,11 @@
     .resp { color: #22c55e; }
     .sys { color: #8b96a5; }
     .warn { color: #f59e0b; }
+    #conn { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
     #bar { display: flex; gap: 8px; margin-top: 8px; }
-    #in { flex: 1; background: #0f141b; border: 1px solid #2a3340; color: #e6edf3;
+    #in, #ip { background: #0f141b; border: 1px solid #2a3340; color: #e6edf3;
           border-radius: 8px; padding: 8px; font-family: monospace; }
+    #in { flex: 1; }
     button { background: #3b82f6; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
     .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #ef4444; margin-right: 6px; }
     .dot.on { background: #22c55e; }
@@ -37,6 +39,13 @@
 </head>
 <body>
   <h1><span id="dot" class="dot"></span>Balance Bot - terminal</h1>
+
+  <div id="conn">
+    <span class="k">ESP32 IP:</span>
+    <input id="ip" size="16" placeholder="192.168.4.1" />
+    <button id="connbtn" onclick="reconnect()">Connect</button>
+  </div>
+
   <div>
     <span class="k">rate:</span> <span class="v" id="rate">--</span> Hz
   </div>
@@ -98,7 +107,14 @@
     const term = document.getElementById('term');
     const dot = document.getElementById('dot');
     const input = document.getElementById('in');
-    let ws;
+
+    /* This page is hosted on the PC, so it is not served by the ESP32. The
+     * device address is entered in the IP box and remembered between sessions;
+     * the WebSocket and OTA URLs are built from it. */
+    let ws = null, retry = null;
+    let esp = localStorage.getItem('espIp') || '192.168.4.1';
+    const wsUrl  = () => `ws://${esp}/ws`;
+    const otaUrl = () => `http://${esp}/ota`;
 
     function add(text, cls) {
       const span = document.createElement('span');
@@ -155,9 +171,11 @@
     }
 
     function connect() {
-      ws = new WebSocket(`ws://${location.host}/ws`);
-      ws.onopen = () => { dot.classList.add('on'); add('connected', 'sys'); };
-      ws.onclose = () => { dot.classList.remove('on'); add('disconnected - retrying...', 'sys'); setTimeout(connect, 1500); };
+      clearTimeout(retry);
+      try { ws = new WebSocket(wsUrl()); }
+      catch (e) { add('bad address: ' + esp, 'sys'); return; }
+      ws.onopen = () => { dot.classList.add('on'); add('connected to ' + esp, 'sys'); };
+      ws.onclose = () => { dot.classList.remove('on'); add('disconnected - retrying...', 'sys'); retry = setTimeout(connect, 1500); };
       ws.onmessage = (ev) => {
         let d; try { d = JSON.parse(ev.data); } catch (e) { add(ev.data); return; }
         if (d.type === 'telemetry_batch') {
@@ -177,6 +195,16 @@
           add(d.text, 'resp');
         }
       };
+    }
+
+    /* Point at a new device address (from the IP box) and reconnect. */
+    function reconnect() {
+      const v = document.getElementById('ip').value.trim();
+      if (v) { esp = v; localStorage.setItem('espIp', esp); }
+      clearTimeout(retry);
+      if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} ws = null; }
+      add('connecting to ' + esp + '...', 'sys');
+      connect();
     }
 
     /* A telemetry_batch carries a topic + rows[] in that topic's column order.
@@ -294,9 +322,9 @@
       if (!f) { stat.textContent = 'pick a .bin file first'; return; }
 
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/ota');
+      xhr.open('POST', otaUrl());
       bar.style.display = 'block';
-      add(`uploading firmware: ${f.name} (${(f.size / 1024).toFixed(0)} KB)...`, 'sys');
+      add(`uploading firmware to ${esp}: ${f.name} (${(f.size / 1024).toFixed(0)} KB)...`, 'sys');
 
       xhr.upload.onprogress = (e) => {
         if (!e.lengthComputable) return;
@@ -318,6 +346,9 @@
     }
 
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendCmd(); });
+    const ipBox = document.getElementById('ip');
+    ipBox.value = esp;
+    ipBox.addEventListener('keydown', (e) => { if (e.key === 'Enter') reconnect(); });
     connect();
   </script>
 </body>

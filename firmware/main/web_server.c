@@ -23,17 +23,33 @@ static volatile bool    s_stream_enabled = true;  /* toggle telemetry streaming 
 
 bool web_server_streaming(void) { return s_stream_enabled; }
 
-/* The web page lives in www/index.html and is embedded into the firmware by the
- * build (EMBED_TXTFILES in main/CMakeLists.txt). The linker exposes it through
- * these symbols; EMBED_TXTFILES null-terminates the data so we can treat the
- * start pointer as a C string. */
-extern const char index_html_start[] asm("_binary_index_html_start");
-extern const char index_html_end[]   asm("_binary_index_html_end");
+/* The control UI now runs as a separate web app on the operator's PC and
+ * connects here over WebSocket, so it is served from a different origin. Allow
+ * cross-origin reads/uploads on the HTTP endpoints. (WebSocket is exempt from
+ * CORS, so /ws needs nothing.) */
+static void set_cors(httpd_req_t *req)
+{
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+}
 
+/* The full UI lives in ../../webapp and is hosted on the PC; this root page is
+ * just a pointer to it for anyone who browses to the device directly. */
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
+    static const char page[] =
+        "<!doctype html><meta charset=utf-8><title>Balance Bot</title>"
+        "<body style=\"font-family:system-ui;background:#0e1116;color:#e6edf3;padding:24px\">"
+        "<h2>Balance Bot</h2>"
+        "<p>This device exposes the telemetry API only. The control UI runs as a "
+        "separate web app on your PC and connects here over WebSocket.</p>"
+        "<ul>"
+        "<li>WebSocket: <code>ws://192.168.4.1/ws</code></li>"
+        "<li>Telemetry JSON: <code>/api/telemetry</code></li>"
+        "<li>OTA upload: <code>POST /ota</code></li>"
+        "</ul>"
+        "<p>Open the web app and connect to this device's IP (default 192.168.4.1).</p>";
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, index_html_start, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
 /* Kept so `curl http://192.168.4.1/api/telemetry` still works for quick checks. */
@@ -42,6 +58,7 @@ static esp_err_t telemetry_get_handler(httpd_req_t *req)
     char json[512];
     int n = telemetry_latest_json(json, sizeof(json), "telemetry");
     httpd_resp_set_type(req, "application/json");
+    set_cors(req);
     return httpd_resp_send(req, json, n);
 }
 
@@ -282,12 +299,24 @@ static esp_err_t ota_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "OTA OK - next boot from '%s', rebooting...", target->label);
+    set_cors(req);
     httpd_resp_sendstr(req, "OTA OK - rebooting");
 
     /* Let the HTTP response flush before we pull the rug out. */
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
     return ESP_OK;
+}
+
+/* CORS preflight for the OTA upload: the browser sends an OPTIONS request first
+ * because the cross-origin POST carries a non-simple content type. */
+static esp_err_t ota_options_handler(httpd_req_t *req)
+{
+    set_cors(req);
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "*");
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
 }
 
 void start_webserver(void)
@@ -314,6 +343,10 @@ void start_webserver(void)
 
     httpd_uri_t ota = { .uri = "/ota", .method = HTTP_POST, .handler = ota_post_handler };
     httpd_register_uri_handler(s_httpd, &ota);
+
+    httpd_uri_t ota_opt = { .uri = "/ota", .method = HTTP_OPTIONS,
+                            .handler = ota_options_handler };
+    httpd_register_uri_handler(s_httpd, &ota_opt);
 
     ESP_LOGI(TAG, "HTTP + WebSocket + OTA server up");
 }

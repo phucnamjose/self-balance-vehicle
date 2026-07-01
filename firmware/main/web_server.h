@@ -2,9 +2,11 @@
  * @file web_server.h
  * @brief HTTP + WebSocket server, command terminal and wireless OTA.
  *
- *   /     : serves the embedded web page (www/index.html)
+ *   /     : a tiny landing page; the full control UI runs as a separate web app
+ *           on the operator's PC (see ../../webapp) and connects over /ws
  *   /ws   : full-duplex channel - server streams telemetry JSON, browser sends
  *           text commands (help/stats/motor/stop/enc reset/stream/rollback)
+ *   /api/telemetry : latest snapshot as JSON (CORS-enabled) for quick checks
  *   /ota  : POST a new .bin; written to the spare app slot, then reboot.
  */
 #pragma once
