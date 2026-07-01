@@ -1,6 +1,7 @@
 #include "control.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -20,8 +21,9 @@ static const char *TAG = "control";
 #define ALARM_COUNT    (TIMER_RES_HZ / CONTROL_HZ)
 
 /* Scratch buffer for one packed telemetry frame. The largest topic (imu, 9
- * fields) is 4 + SAMPLES_PER_BATCH*9*4 bytes; 4 KB leaves comfortable margin. */
-#define REPORT_FRAME_CAP  4096
+ * fields) is 4 + SAMPLES_PER_BATCH*(8 + 8*4) bytes (~4 KB at 100 samples, the
+ * timestamp is a u64); 8 KB leaves comfortable margin. */
+#define REPORT_FRAME_CAP  8192
 
 static TaskHandle_t s_control_task;
 
@@ -46,6 +48,11 @@ static volatile control_mode_t s_mode = STOP_CONTROL;  /* set to START by contro
 static gptimer_handle_t  s_timer;        /* created once, kept across stop/start */
 static bool              s_periph_ready; /* peripherals init'd once, on first start */
 static volatile bool     s_stop_req;     /* ask the loop to exit at a safe point */
+
+/* Research feature flags, read every tick by the control loop. Default (both
+ * off) is TEST_MOTORS: plain open-loop motor test, no estimation or controller. */
+static volatile bool     s_est_enabled;  /* run the orientation (roll/pitch) estimate */
+static volatile bool     s_ctrl_enabled; /* run the wheel/motor controller */
 
 /* ISR context: keep it minimal - just wake the control task for the next tick. */
 static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
@@ -143,15 +150,30 @@ static void control_task(void *arg)
         primed = true;
 
         /* Read the IMU every tick. The I2C transfer (~0.4 ms) blocks this task
-         * only, and the per-tick dt check above flags it if jitter creeps in.
-         * (later: feed imu into the orientation estimate + PID -> "level") */
+         * only, and the per-tick dt check above flags it if jitter creeps in. */
         imu = mpu6050_read();
 
-        /* Apply the latest open-loop motor commands (set from the web terminal).
-         * The 'stop' command zeroes these; STOP_CONTROL deletes this task
-         * entirely. (later: the PID output drives these instead.) */
-        float cmdL = motor_cmd_get(0);
-        float cmdR = motor_cmd_get(1);
+        /* Orientation estimate (roll/pitch, rad). Gated by the estimation flag
+         * so it can be A/B tested in isolation; when off the angles topic stays
+         * empty (NaN). */
+        float roll = NAN, pitch = NAN;
+        if (s_est_enabled) {
+            /* TODO: complementary / Kalman filter from imu -> roll, pitch. */
+        }
+
+        /* Motor commands. With the controller enabled they come from the wheel
+         * controller; otherwise they are the open-loop effort set from the web
+         * terminal ('motor'/'stop'). ('stop' only zeroes the open-loop command;
+         * STOP_CONTROL deletes this task entirely.) */
+        float cmdL, cmdR;
+        if (s_ctrl_enabled) {
+            /* TODO: wheel/velocity controller -> cmdL, cmdR from setpoints. */
+            cmdL = 0.0f;
+            cmdR = 0.0f;
+        } else {
+            cmdL = motor_cmd_get(0);
+            cmdR = motor_cmd_get(1);
+        }
         motor_set(0, cmdL);
         motor_set(1, cmdR);
 
@@ -169,6 +191,8 @@ static void control_task(void *arg)
         smp->posR = (float)encoder_angle_rad(1);
         smp->velL = encoder_cps_to_radps((int32_t)((posL_cnt - pos_last[0]) * cps_scale));
         smp->velR = encoder_cps_to_radps((int32_t)((posR_cnt - pos_last[1]) * cps_scale));
+        smp->roll  = roll;
+        smp->pitch = pitch;
         smp->mL   = cmdL;
         smp->mR   = cmdR;
         smp->imu  = imu;
@@ -299,3 +323,18 @@ void control_set_mode(control_mode_t mode)
         s_mode = STOP_CONTROL;
     }
 }
+
+void control_set_experiment(experiment_mode_t mode)
+{
+    switch (mode) {
+        case TEST_MOTOR_CONTROLLERS: s_est_enabled = false; s_ctrl_enabled = true;  break;
+        case TEST_ANGLES_ESTIMATION: s_est_enabled = true;  s_ctrl_enabled = false; break;
+        case TEST_MOTORS:
+        default:                     s_est_enabled = false; s_ctrl_enabled = false; break;
+    }
+}
+
+bool control_estimation_enabled(void) { return s_est_enabled; }
+void control_set_estimation(bool on)  { s_est_enabled = on; }
+bool control_controller_enabled(void) { return s_ctrl_enabled; }
+void control_set_controller(bool on)  { s_ctrl_enabled = on; }

@@ -31,3 +31,22 @@ control_mode_t control_mode(void);
  *   START_CONTROL - start or restart the control task.
  * The peripherals and GPTimer are initialised once and reused across restarts. */
 void control_set_mode(control_mode_t mode);
+
+/* Experiment presets for bring-up / research. Selecting one sets the two feature
+ * flags below to a known combination; you can also flip either flag on its own
+ * for a custom combo. These only change what the control loop *computes* - they
+ * are orthogonal to the STOP/START lifecycle above. */
+typedef enum {
+    TEST_MOTORS,             /* open-loop motor test: estimation OFF, controller OFF */
+    TEST_MOTOR_CONTROLLERS,  /* wheel/motor controller ON, estimation OFF */
+    TEST_ANGLES_ESTIMATION,  /* angle estimation ON, controller OFF */
+} experiment_mode_t;
+
+/* Apply an experiment preset (overwrites both feature flags). */
+void control_set_experiment(experiment_mode_t mode);
+
+/* Individual feature flags read every tick by the control loop. */
+bool control_estimation_enabled(void);
+void control_set_estimation(bool on);
+bool control_controller_enabled(void);
+void control_set_controller(bool on);

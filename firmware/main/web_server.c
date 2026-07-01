@@ -81,14 +81,48 @@ static void ws_reply(httpd_req_t *req, const char *text)
     ws_send_text(req, buf);
 }
 
+/* Report the current experiment feature flags to the terminal. */
+static void reply_experiment(httpd_req_t *req)
+{
+    char msg[80];
+    snprintf(msg, sizeof(msg), "experiment: estimation %s, controller %s",
+             control_estimation_enabled() ? "ON" : "OFF",
+             control_controller_enabled() ? "ON" : "OFF");
+    ws_reply(req, msg);
+}
+
 /* Interpret a text command from the terminal. Add new commands here as the
  * project grows (later: set gains, change PWM, start/stop, etc.). */
 static void handle_command(httpd_req_t *req, const char *cmd)
 {
     if (strcmp(cmd, "help") == 0) {
         ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | stop | "
-                      "control start | control stop | enc reset | stream on | stream off | "
+                      "control start | control stop | exp motors|motor-ctrl|angles | "
+                      "est on|off | ctrl on|off | enc reset | stream on | stream off | "
                       "rollback | (flashing requires STOP_CONTROL)");
+    } else if (strcmp(cmd, "exp motors") == 0) {
+        control_set_experiment(TEST_MOTORS);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "exp motor-ctrl") == 0) {
+        control_set_experiment(TEST_MOTOR_CONTROLLERS);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "exp angles") == 0) {
+        control_set_experiment(TEST_ANGLES_ESTIMATION);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "exp") == 0) {
+        reply_experiment(req);
+    } else if (strcmp(cmd, "est on") == 0) {
+        control_set_estimation(true);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "est off") == 0) {
+        control_set_estimation(false);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "ctrl on") == 0) {
+        control_set_controller(true);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "ctrl off") == 0) {
+        control_set_controller(false);
+        reply_experiment(req);
     } else if (strcmp(cmd, "enc reset") == 0) {
         encoder_reset(0);
         encoder_reset(1);
@@ -162,7 +196,16 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         esp_restart();
     } else if (strcmp(cmd, "stats") == 0) {
         char json[512];
-        telemetry_latest_json(json, sizeof(json), "resp_stats");
+        int n = telemetry_latest_json(json, sizeof(json), "resp_stats");
+        /* Splice the current modes in before the closing brace so a single
+         * 'stats' shows both the loop numbers and what the loop is running. */
+        if (n > 0 && n < (int)sizeof(json) && json[n - 1] == '}') {
+            snprintf(json + n - 1, sizeof(json) - (n - 1),
+                     ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d}",
+                     control_mode() == START_CONTROL ? "START_CONTROL" : "STOP_CONTROL",
+                     control_estimation_enabled() ? 1 : 0,
+                     control_controller_enabled() ? 1 : 0);
+        }
         ws_send_text(req, json);
     } else if (strcmp(cmd, "stream on") == 0) {
         s_stream_enabled = true;
