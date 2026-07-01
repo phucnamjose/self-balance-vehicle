@@ -12,8 +12,8 @@ logic) that drives our **two DC gear motors** - one per wheel. The ESP32 tells i
 |-----------|-------|---------------------|
 | Channels | 2 | One per wheel - exactly what we need |
 | Motor supply | DC 6.5 - 27 V | Run motors from a battery (e.g. 2S/3S Li-ion, 7.4-12 V) |
-| Logic supply | DC 5 V | Powers the board's logic side |
-| Logic level | High = 3.0 - 6.5 V | **3.3 V compatible -> ESP32 GPIO drives it directly, no level shifter** |
+| Logic supply | DC 3.3 - 5 V | Powers the board's logic side. **Power this from 3.3 V** (see note below) so the ESP32's 3.3 V signals are full-scale against the logic rail |
+| Logic level | High = 3.0 - 6.5 V | At 5 V logic supply, a 3.3 V GPIO sits at the bottom of the input range and is unreliable (esp. the PWM `EN` pin). Powering the logic side at 3.3 V fixes this - no level shifter needed |
 | Continuous current | 7 A / channel | Plenty for small gear motors |
 | Peak current | 50 A | Handles stall/startup surges |
 | PWM frequency | **0 - 10 kHz** | **Hard ceiling. Keep motor PWM <= 10 kHz** (the earlier "20 kHz" note is wrong for this board) |
@@ -117,7 +117,7 @@ Each A/B pair drives one PCNT unit configured for 4x decoding.
               |  |              OUT3 |---- Right motor +
               |  |              OUT4 |---- Right motor -
               |  |                   |
-   5V supply ---->| +5V             |
+  ESP32 3V3 ---->| +5V             |   (logic supply: use 3.3 V, see notes)
               +->| GND               |   (common ground!)
                  |  IN1 IN2 ENA      |
                  |  IN3 IN4 ENB      |
@@ -131,14 +131,19 @@ Each A/B pair drives one PCNT unit configured for 4x decoding.
 
 ## 5. Power & safety notes
 
-- **The inputs are optocoupler-isolated - the `+5V` logic pin MUST be powered.**
+- **The inputs are optocoupler-isolated - the logic-supply pin MUST be powered.**
   Unlike an L298N (which makes its own 5V from the motor supply), this board's
-  input/opto side is dead until you feed its `+5V`/`GND` header. Wire driver `+5V`
-  <- ESP32 `5V` (or external 5 V) and driver `GND` <- ESP32 `GND`. **No `+5V` =
-  motors never move, even with perfect signals.** This is the #1 "it doesn't work".
-- **3.3 V is at the bottom of the input range (spec: 3-6.5 V).** It usually works,
-  but if signals are flaky after power/ground are correct, drive the IN/EN pins
-  with 5 V logic (level shifter) or verify the opto actually triggers.
+  input/opto side is dead until you feed its logic `+5V`/`GND` header. **No logic
+  supply = motors never move, even with perfect signals.** This is the #1 "it
+  doesn't work".
+- **Power the logic side from 3.3 V, not 5 V (verified on this build).** With the
+  logic rail at 5 V, the ESP32's 3.3 V `IN`/`EN` outputs sit at the bottom of the
+  input range and don't reliably trigger the opto inputs - the symptom is the
+  `motor ... = N%` reply printing while the wheels stay dead. Feeding the driver's
+  logic `+5V` pin from the ESP32 `3V3` instead makes the 3.3 V signals full-scale
+  against the logic rail and they trigger reliably, with no level shifter. (If you
+  must keep the logic rail at 5 V, drive IN/EN through a 3.3->5 V **non-inverting**
+  buffer such as a 74HCT244/245 - HCT, not HC, for the 2.0 V input threshold.)
 - **Common ground is mandatory.** ESP32 GND, driver `GND`/`+5V` return, and the
   battery `PGND` must all be tied together, or the logic signals have no reference
   and the motors won't respond (a very common "it doesn't work" cause).
