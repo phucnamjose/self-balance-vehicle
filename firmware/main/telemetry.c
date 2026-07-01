@@ -49,19 +49,25 @@ int telemetry_latest_json(char *buf, size_t len, const char *type)
  * Each topic is a projection of sample_t packed into a compact binary frame:
  *
  *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
- *   then, per sample: uint32 t_ms, followed by (field_count-1) float32 values
+ *   then, per sample: uint64 t_us, followed by (field_count-1) float32 values
  *
  * All multi-byte values are little-endian (matches the ESP32 and the browser's
- * DataView with littleEndian=true). Column 0 is always the timestamp in
- * milliseconds since boot; the rest are float32. Fields not produced yet
- * (orientation estimate, control setpoints) are packed as NaN, which the client
- * renders as empty CSV cells. The per-topic column order below is the contract
- * the client decoder must mirror. */
+ * DataView with littleEndian=true). Column 0 is always the timestamp as a
+ * uint64 count of microseconds since boot (full esp_timer resolution); the rest
+ * are float32. Fields not produced yet (orientation estimate, control setpoints)
+ * are packed as NaN, which the client renders as empty CSV cells. The per-topic
+ * column order below is the contract the client decoder must mirror. */
 static inline uint8_t *put_u32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)v;  p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);  p[3] = (uint8_t)(v >> 24);
     return p + 4;
+}
+
+static inline uint8_t *put_u64(uint8_t *p, uint64_t v)
+{
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+    return p + 8;
 }
 
 static inline uint8_t *put_f32(uint8_t *p, float f)
@@ -73,12 +79,12 @@ static inline uint8_t *put_f32(uint8_t *p, float f)
 
 static inline uint8_t *put_t(uint8_t *p, const sample_t *s)
 {
-    return put_u32(p, (uint32_t)(s->t_us / 1000));   /* ms since boot */
+    return put_u64(p, (uint64_t)s->t_us);   /* us since boot */
 }
 
 typedef int (*pack_fn)(uint8_t *buf, const sample_t *s);   /* returns bytes */
 
-/* imu: [ t(ms), ax, ay, az, gx, gy, gz, temp, ok ]
+/* imu: [ t(us), ax, ay, az, gx, gy, gz, temp, ok ]
  *   ax,ay,az  g   gx,gy,gz  deg/s   temp  degC   ok  1.0/0.0 */
 static int pack_imu(uint8_t *b, const sample_t *s)
 {
@@ -90,17 +96,18 @@ static int pack_imu(uint8_t *b, const sample_t *s)
     return (int)(p - b);
 }
 
-/* angles: [ t(ms), roll, pitch, roll_sp, pitch_sp ]  (radians)
- *   all NaN until orientation estimation / a controller exist */
+/* angles: [ t(us), roll, pitch, roll_sp, pitch_sp ]  (radians)
+ *   roll,pitch  measured estimate (NaN while estimation is off)
+ *   *_sp        setpoints, NaN until a balance controller exists */
 static int pack_angles(uint8_t *b, const sample_t *s)
 {
     uint8_t *p = put_t(b, s);
-    p = put_f32(p, NAN); p = put_f32(p, NAN);
-    p = put_f32(p, NAN); p = put_f32(p, NAN);
+    p = put_f32(p, s->roll); p = put_f32(p, s->pitch);
+    p = put_f32(p, NAN);     p = put_f32(p, NAN);
     return (int)(p - b);
 }
 
-/* motors: [ t(ms), velL, velR, velL_sp, velR_sp, mL, mR ]
+/* motors: [ t(us), velL, velR, velL_sp, velR_sp, mL, mR ]
  *   velL,velR  rad/s (measured)   *_sp  NaN (no controller)   mL,mR  -1..+1 */
 static int pack_motors(uint8_t *b, const sample_t *s)
 {
@@ -133,7 +140,9 @@ int telemetry_topic_pack(uint8_t *buf, size_t len, int topic,
     if (topic < 0 || topic >= NUM_TOPICS) return -1;
 
     uint8_t fields = TOPICS[topic].fields;
-    size_t need = 4 + (size_t)n * fields * 4;   /* header + n * fields * 4B */
+    /* header(4) + n * ( t(u64, 8B) + (fields-1) float32 ) */
+    size_t per_sample = 8 + (size_t)(fields - 1) * 4;
+    size_t need = 4 + (size_t)n * per_sample;
     if (need > len) return -1;
 
     buf[0] = (uint8_t)topic;

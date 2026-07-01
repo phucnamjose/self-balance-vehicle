@@ -42,6 +42,7 @@ typedef struct {
     int64_t t_us;          /* esp_timer_get_time() at this tick (real time) */
     float   posL, posR;    /* wheel angle, radians */
     float   velL, velR;    /* wheel angular speed, rad/s */
+    float   roll, pitch;   /* orientation estimate, rad (NaN when estimation off) */
     float   mL, mR;        /* commanded motor effort, -1..+1 */
     imu_t   imu;           /* latest IMU sample */
 } sample_t;
@@ -66,7 +67,7 @@ const char *telemetry_topic_name(int topic);
  * (sent as a WebSocket binary message):
  *
  *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
- *   then, per sample: uint32 t_ms, followed by (field_count-1) float32 values
+ *   then, per sample: uint64 t_us, followed by (field_count-1) float32 values
  *
  * Column order/units are documented next to each topic's packer in telemetry.c
  * and mirrored on the client. Not-yet-available fields are packed as NaN.
