@@ -38,5 +38,8 @@ travel over Wi-Fi to the device; everything else is local.
 - Recording: pick a topic (`imu` / `angles` / `motors`) and click **Record to
   file**. On Chromium it streams straight to disk; on Firefox/Safari it buffers
   in memory and downloads `topic_YYYYMMDD_HHMMSS.csv` when you stop.
-- The column order in the `TOPICS` map here must stay in sync with the per-topic
-  encoders in `firmware/main/telemetry.c` (`telemetry_topic_json`).
+- Telemetry batches arrive as packed binary WebSocket frames (little-endian:
+  `[u8 topic_id][u8 field_count][u16 sample_count]` then per sample a `uint32`
+  `t_ms` and `field_count-1` `float32`s). The `TOPIC_BY_ID` / `TOPICS` / `FMT`
+  tables here must stay in sync with the per-topic packers in
+  `firmware/main/telemetry.c` (`telemetry_topic_pack`).

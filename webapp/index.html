@@ -46,9 +46,6 @@
     <button id="connbtn" onclick="reconnect()">Connect</button>
   </div>
 
-  <div>
-    <span class="k">rate:</span> <span class="v" id="rate">--</span> Hz
-  </div>
   <div style="margin-top:6px">
     <span class="k">accel (g):</span> <span class="v" id="acc">--</span> &nbsp;
     <span class="k">gyro (dps):</span> <span class="v" id="gyr">--</span> &nbsp;
@@ -59,8 +56,6 @@
     <span class="k">motor R:</span> <span class="v" id="mR">--</span>
   </div>
   <div style="margin-top:6px">
-    <span class="k">enc L (rad):</span> <span class="v" id="posL">--</span> &nbsp;
-    <span class="k">enc R (rad):</span> <span class="v" id="posR">--</span> &nbsp;
     <span class="k">vel (rad/s):</span> <span class="v" id="vel">--</span> &nbsp;
     <button onclick="send('enc reset')">reset enc</button>
   </div>
@@ -76,6 +71,13 @@
     <span id="mvallbl" class="v">0%</span>
     <button onclick="applyMotor()">Apply</button>
     <button class="stopbtn" onclick="send('stop')">STOP</button>
+  </div>
+
+  <div id="ctrl" style="margin-top:8px;">
+    <span class="k">control task:</span>
+    <button onclick="send('control start')">START_CONTROL</button>
+    <button class="stopbtn" onclick="send('control stop')">STOP_CONTROL</button>
+    <span class="v">(stop before flashing)</span>
   </div>
 
   <div id="rec" style="margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
@@ -117,9 +119,12 @@
     const otaUrl = () => `http://${esp}/ota`;
 
     function add(text, cls) {
+      const now = new Date();
+      const ts = now.toTimeString().slice(0, 8) +
+                 '.' + String(now.getMilliseconds()).padStart(3, '0');
       const span = document.createElement('span');
       if (cls) span.className = cls;
-      span.textContent = text + '\n';
+      span.textContent = `[${ts}] ${text}\n`;
       term.appendChild(span);
       term.scrollTop = term.scrollHeight;
       while (term.childElementCount > 500) term.removeChild(term.firstChild);
@@ -131,7 +136,6 @@
     /* Each field updates independently so a per-topic frame (which carries only
      * some of them) refreshes just its own part of the dashboard. */
     function setValues(d) {
-      if (d.rate !== undefined) rate.textContent = d.rate;
       if (d.imu_ok !== undefined) {
         if (d.imu_ok) {
           acc.textContent = `${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}`;
@@ -145,22 +149,29 @@
         mL.textContent = (d.mL * 100).toFixed(0) + '%';
         mR.textContent = (d.mR * 100).toFixed(0) + '%';
       }
-      if (d.posL !== undefined) {
-        posL.textContent = d.posL.toFixed(3);
-        posR.textContent = d.posR.toFixed(3);
-      }
       if (d.velL !== undefined) {
         vel.textContent = `${f2(d.velL)} ${f2(d.velR)}`;
       }
     }
 
-    /* Column order of each telemetry topic's rows. This MUST match the per-topic
-     * encoders in telemetry.c (telemetry_topic_json) - frames omit the keys to
-     * stay small, so both ends hardcode the order. */
+    /* Telemetry batches arrive as packed binary WebSocket frames:
+     *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
+     *   then, per sample: uint32 t_ms, followed by (field_count-1) float32 values
+     * The column order and the topic_id -> name mapping below MUST match the
+     * per-topic packers in telemetry.c (telemetry_topic_pack). Column 0 (t) is
+     * always ms since boot; other fields are float32 (NaN => empty cell). */
+    const TOPIC_BY_ID = ['imu', 'angles', 'motors'];
     const TOPICS = {
       imu:    ['t', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp', 'ok'],
       angles: ['t', 'roll', 'pitch', 'roll_sp', 'pitch_sp'],
       motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR'],
+    };
+    /* Decimal places per column for the CSV (mirrors the old firmware precision).
+     * Column 0 (t) is handled specially: ms -> seconds with 3 decimals. */
+    const FMT = {
+      imu:    [3, 3, 3, 3, 2, 2, 2, 1, 0],
+      angles: [3, 4, 4, 4, 4],
+      motors: [3, 3, 3, 3, 3, 2, 2],
     };
 
     /* Turn one batch row into a flat object keyed by the topic's columns. */
@@ -170,17 +181,37 @@
       return o;
     }
 
+    /* Decode one packed binary batch into { topic, cols, rows } where each row is
+     * a numeric array in the topic's column order (t in ms, NaN for empty). */
+    function decodeBatch(buf) {
+      const dv = new DataView(buf);
+      const topic = TOPIC_BY_ID[dv.getUint8(0)];
+      const nf = dv.getUint8(1);
+      const ns = dv.getUint16(2, true);
+      if (!topic) return null;
+      const cols = TOPICS[topic];
+      const rows = [];
+      let off = 4;
+      for (let i = 0; i < ns; i++) {
+        const r = new Array(nf);
+        r[0] = dv.getUint32(off, true); off += 4;   /* t in ms */
+        for (let j = 1; j < nf; j++) { r[j] = dv.getFloat32(off, true); off += 4; }
+        rows.push(r);
+      }
+      return { topic, cols, rows };
+    }
+
     function connect() {
       clearTimeout(retry);
       try { ws = new WebSocket(wsUrl()); }
       catch (e) { add('bad address: ' + esp, 'sys'); return; }
+      ws.binaryType = 'arraybuffer';   /* telemetry batches arrive as binary */
       ws.onopen = () => { dot.classList.add('on'); add('connected to ' + esp, 'sys'); };
       ws.onclose = () => { dot.classList.remove('on'); add('disconnected - retrying...', 'sys'); retry = setTimeout(connect, 1500); };
       ws.onmessage = (ev) => {
+        if (ev.data instanceof ArrayBuffer) { onBinary(ev.data); return; }
         let d; try { d = JSON.parse(ev.data); } catch (e) { add(ev.data); return; }
-        if (d.type === 'telemetry_batch') {
-          onBatch(d);
-        } else if (d.type === 'telemetry') {
+        if (d.type === 'telemetry') {
           setValues(d);
         } else if (d.type === 'resp_stats') {
           setValues(d);
@@ -207,23 +238,22 @@
       connect();
     }
 
-    /* A telemetry_batch carries a topic + rows[] in that topic's column order.
+    /* A telemetry batch carries a topic + rows[] in that topic's column order.
      * Refresh the matching part of the dashboard from the last row, and (if we
      * are recording this topic) append its rows to the CSV. */
-    function onBatch(d) {
-      const cols = TOPICS[d.topic];
-      if (!cols) return;
-      if (d.rows && d.rows.length) {
-        const last = rowToObj(cols, d.rows[d.rows.length - 1]);
-        if (d.topic === 'imu') {
-          setValues({ imu_ok: !!last.ok, ax: last.ax, ay: last.ay, az: last.az,
-                      gx: last.gx, gy: last.gy, gz: last.gz, temp: last.temp });
-        } else if (d.topic === 'motors') {
-          setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR });
-        }
-        /* 'angles' has no live readout yet (values are null until estimation). */
+    function onBinary(buf) {
+      const b = decodeBatch(buf);
+      if (!b || !b.rows.length) return;
+      const { topic, cols, rows } = b;
+      const last = rowToObj(cols, rows[rows.length - 1]);
+      if (topic === 'imu') {
+        setValues({ imu_ok: !!last.ok, ax: last.ax, ay: last.ay, az: last.az,
+                    gx: last.gx, gy: last.gy, gz: last.gz, temp: last.temp });
+      } else if (topic === 'motors') {
+        setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR });
       }
-      if (recording && d.topic === recTopic) writeBatch(d, cols);
+      /* 'angles' has no live readout yet (values are NaN until estimation). */
+      if (recording && topic === recTopic) writeBatch(topic, cols, rows);
     }
 
     /* ---- recording the telemetry stream to a CSV file ----
@@ -241,15 +271,23 @@
       return `${topic}_${date}_${time}.csv`;
     }
 
-    function batchToCsv(d, cols) {
+    /* Format one decoded cell for the CSV: t (col 0) is ms -> seconds, NaN is an
+     * empty cell, everything else uses the topic's per-column decimal places. */
+    function fmtCell(topic, j, v) {
+      if (j === 0) return (v / 1000).toFixed(3);   /* t: ms -> s */
+      if (Number.isNaN(v)) return '';
+      return v.toFixed(FMT[topic][j]);
+    }
+
+    function batchToCsv(topic, cols, rows) {
       let out = '';
       if (csvHeader === null) { csvHeader = cols.join(','); out += csvHeader + '\n'; }
-      for (const r of d.rows) out += r.join(',') + '\n';
+      for (const r of rows) out += r.map((v, j) => fmtCell(topic, j, v)).join(',') + '\n';
       return out;
     }
 
-    async function writeBatch(d, cols) {
-      const text = batchToCsv(d, cols);
+    async function writeBatch(topic, cols, rows) {
+      const text = batchToCsv(topic, cols, rows);
       if (fileWriter) {
         try { await fileWriter.write(text); } catch (e) { recstat('write error: ' + e.message); }
       } else {

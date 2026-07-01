@@ -62,10 +62,14 @@ int telemetry_latest_json(char *buf, size_t len, const char *type);
 int         telemetry_topic_count(void);
 const char *telemetry_topic_name(int topic);
 
-/* Serialize @p n samples of topic @p topic to a compact frame:
- *   {"type":"telemetry_batch","topic":"<name>","rows":[[..],..]}
- * Rows are bare numeric arrays (keys omitted to stay small); the column order
- * is documented next to each topic's encoder in telemetry.c and mirrored on the
- * client. Returns the string length, or a negative value if it would not fit. */
-int telemetry_topic_json(char *buf, size_t len, int topic,
+/* Pack @p n samples of topic @p topic into @p buf as a compact binary frame
+ * (sent as a WebSocket binary message):
+ *
+ *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
+ *   then, per sample: uint32 t_ms, followed by (field_count-1) float32 values
+ *
+ * Column order/units are documented next to each topic's packer in telemetry.c
+ * and mirrored on the client. Not-yet-available fields are packed as NaN.
+ * Returns the byte length, or a negative value if it would not fit. */
+int telemetry_topic_pack(uint8_t *buf, size_t len, int topic,
                          const sample_t *samples, int n);

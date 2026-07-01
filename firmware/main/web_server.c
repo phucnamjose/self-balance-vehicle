@@ -15,6 +15,7 @@
 #include "telemetry.h"
 #include "motors.h"
 #include "encoders.h"
+#include "control.h"           /* control_mode(): gate OTA on STOP_CONTROL */
 
 static const char *TAG = "web_server";
 
@@ -85,14 +86,19 @@ static void ws_reply(httpd_req_t *req, const char *text)
 static void handle_command(httpd_req_t *req, const char *cmd)
 {
     if (strcmp(cmd, "help") == 0) {
-        ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | "
-                      "stop | enc reset | stream on | stream off | rollback");
+        ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | stop | "
+                      "control start | control stop | enc reset | stream on | stream off | "
+                      "rollback | (flashing requires STOP_CONTROL)");
     } else if (strcmp(cmd, "enc reset") == 0) {
         encoder_reset(0);
         encoder_reset(1);
         ws_reply(req, "encoder counts reset to 0");
     } else if (strncmp(cmd, "motor ", 6) == 0) {
         /* Open-loop test: "motor l 50", "motor r -30", "motor both 40". */
+        if (control_mode() != START_CONTROL) {
+            ws_reply(req, "control task stopped - send 'control start' first");
+            return;
+        }
         char which[8];
         int pct;
         if (sscanf(cmd + 6, "%7s %d", which, &pct) != 2) {
@@ -117,9 +123,17 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         snprintf(msg, sizeof(msg), "motor %s = %d%%", which, pct);
         ws_reply(req, msg);
     } else if (strcmp(cmd, "stop") == 0) {
+        /* Motor-test stop: just zero the outputs. The control task keeps running
+         * (this is NOT STOP_CONTROL); a new motor command re-enables movement. */
         motor_cmd_set(0, 0.0f);
         motor_cmd_set(1, 0.0f);
-        ws_reply(req, "motors stopped");
+        ws_reply(req, "motor test stopped (outputs 0); control task still running");
+    } else if (strcmp(cmd, "control stop") == 0) {
+        control_set_mode(STOP_CONTROL);
+        ws_reply(req, "STOP_CONTROL: control task stopped, motors off (flashing allowed)");
+    } else if (strcmp(cmd, "control start") == 0) {
+        control_set_mode(START_CONTROL);
+        ws_reply(req, "START_CONTROL: control task running");
     } else if (strcmp(cmd, "rollback") == 0) {
         /* Switch boot to the other OTA slot (the image we ran before the last
          * upload) and reboot. esp_ota_set_boot_partition validates the slot, so
@@ -188,23 +202,32 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* Runs in the HTTP server task (scheduled via httpd_queue_work). Sends the text
- * to every WS client. The actual socket send blocks here, NOT in reporter_task,
- * so a slow/laggy client can't stall telemetry or logging. A client whose send
- * fails is dropped so it reconnects fresh instead of wedging future sends.
- * @p arg is a malloc'd, NUL-terminated copy of the payload that we free here. */
+/* One queued WebSocket message: a length + frame type followed inline by the
+ * payload bytes (so text and binary share the same path; binary may contain NUL
+ * so we can't rely on strlen). Allocated by ws_enqueue, freed by ws_async_send. */
+typedef struct {
+    size_t                len;
+    httpd_ws_type_t       type;
+    /* payload bytes follow immediately after this header */
+} ws_msg_t;
+
+/* Runs in the HTTP server task (scheduled via httpd_queue_work). Sends the
+ * message to every WS client. The actual socket send blocks here, NOT in
+ * reporter_task, so a slow/laggy client can't stall telemetry or logging. A
+ * client whose send fails is dropped so it reconnects fresh instead of wedging
+ * future sends. @p arg is a malloc'd ws_msg_t (+payload) that we free here. */
 static void ws_async_send(void *arg)
 {
-    char *text = (char *)arg;
-    if (!s_httpd) { free(text); return; }
+    ws_msg_t *msg = (ws_msg_t *)arg;
+    if (!s_httpd) { free(msg); return; }
 
     size_t max = CONFIG_LWIP_MAX_SOCKETS;
     int fds[CONFIG_LWIP_MAX_SOCKETS];
-    if (httpd_get_client_list(s_httpd, &max, fds) != ESP_OK) { free(text); return; }
+    if (httpd_get_client_list(s_httpd, &max, fds) != ESP_OK) { free(msg); return; }
 
     httpd_ws_frame_t frame = {
-        .final = true, .type = HTTPD_WS_TYPE_TEXT,
-        .payload = (uint8_t *)text, .len = strlen(text),
+        .final = true, .type = msg->type,
+        .payload = (uint8_t *)(msg + 1), .len = msg->len,
     };
     for (size_t i = 0; i < max; i++) {
         if (httpd_ws_get_fd_info(s_httpd, fds[i]) != HTTPD_WS_CLIENT_WEBSOCKET) {
@@ -214,17 +237,31 @@ static void ws_async_send(void *arg)
             httpd_sess_trigger_close(s_httpd, fds[i]);   /* drop the wedged client */
         }
     }
-    free(text);
+    free(msg);
+}
+
+/* Copy @p len bytes of @p data into a queued message of the given frame type. */
+static void ws_enqueue(const void *data, size_t len, httpd_ws_type_t type)
+{
+    if (!s_httpd) return;
+    ws_msg_t *msg = malloc(sizeof(*msg) + len);
+    if (!msg) return;
+    msg->len  = len;
+    msg->type = type;
+    memcpy(msg + 1, data, len);
+    if (httpd_queue_work(s_httpd, ws_async_send, msg) != ESP_OK) {
+        free(msg);   /* couldn't queue - drop this frame rather than leak */
+    }
 }
 
 void ws_broadcast(const char *text)
 {
-    if (!s_httpd) return;
-    char *copy = strdup(text);
-    if (!copy) return;
-    if (httpd_queue_work(s_httpd, ws_async_send, copy) != ESP_OK) {
-        free(copy);   /* couldn't queue - drop this frame rather than leak */
-    }
+    ws_enqueue(text, strlen(text), HTTPD_WS_TYPE_TEXT);
+}
+
+void ws_broadcast_bin(const void *data, size_t len)
+{
+    ws_enqueue(data, len, HTTPD_WS_TYPE_BINARY);
 }
 
 /* ===================== OTA: wireless firmware upload ===================== */
@@ -237,6 +274,19 @@ void ws_broadcast(const char *text)
 
 static esp_err_t ota_post_handler(httpd_req_t *req)
 {
+    /* Safety gate: only flash in STOP_CONTROL, where the control task is fully
+     * stopped and the motors are parked. Send the refusal as a normal CORS
+     * response (not httpd_resp_send_err) so the cross-origin web app can actually
+     * read the 403 status and message. On a failed flash the task stays stopped;
+     * the operator brings it back explicitly with 'control start'. */
+    if (control_mode() != STOP_CONTROL) {
+        ESP_LOGW(TAG, "OTA refused: control task is running");
+        set_cors(req);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "flashing blocked: stop the control task first (send 'control stop')");
+        return ESP_OK;
+    }
+
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (target == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no OTA slot");

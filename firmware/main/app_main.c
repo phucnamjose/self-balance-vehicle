@@ -36,9 +36,6 @@
 #include "nvs_flash.h"
 
 #include "led.h"
-#include "motors.h"
-#include "encoders.h"
-#include "imu.h"
 #include "telemetry.h"
 #include "wifi_ap.h"
 #include "web_server.h"
@@ -64,19 +61,12 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
-    led_init();     /* Left/Right LEDs for notifications */
-    motor_init();   /* motors start stopped */
-    encoder_init(); /* PCNT quadrature counters, count from 0 */
+    led_init();     /* Left/Right LEDs for notifications (core 0 heartbeat only) */
 
-    /* Bring up I2C and scan once at boot so we can confirm the IMU is wired. */
-    i2c_init();
-    i2c_scan();
-
-    /* Attach + wake the MPU6050. If it's missing we keep running (the control
-     * loop just reports imu_ok=false) so the rest of the firmware still works. */
-    if (!mpu6050_init()) {
-        ESP_LOGW(TAG, "continuing without IMU - check wiring at SDA=21 SCL=22");
-    }
+    /* NOTE: every peripheral the control loop drives - encoders (PCNT), motors
+     * (LEDC) and I2C + MPU6050 - is deliberately brought up in control_task (see
+     * control.c) so their interrupts land on core 1, keeping the real-time path
+     * isolated from core 0's Wi-Fi. Only the LED (above) stays on core 0. */
 
     /* Cached telemetry snapshot shared with the web server. */
     telemetry_init();
