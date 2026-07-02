@@ -80,6 +80,22 @@
     <span class="v">(stop before flashing)</span>
   </div>
 
+  <div id="exp" style="margin-top:8px;">
+    <span class="k">experiment:</span>
+    <button onclick="send('exp motors')">TEST_MOTORS</button>
+    <button onclick="send('exp motor-ctrl')">TEST_MOTOR_CONTROLLERS</button>
+    <button onclick="send('exp angles')">TEST_ANGLES_ESTIMATION</button>
+  </div>
+
+  <div id="seq" style="margin-top:8px;">
+    <span class="k">motor script:</span>
+    <input type="file" id="seqfile" accept=".csv,.txt" />
+    <button onclick="uploadSeq()">Load &amp; play</button>
+    <button class="stopbtn" onclick="send('play stop')">Stop</button>
+    <span id="seqstat" class="sys"></span>
+    <span class="v">(TEST_MOTORS; steps "dur,mL,mR" - dur sec, mL/mR -1..1, max 20)</span>
+  </div>
+
   <div id="rec" style="margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
     <span class="k">data log:</span>
     <select id="rectopic">
@@ -117,6 +133,7 @@
     let esp = localStorage.getItem('espIp') || '192.168.4.1';
     const wsUrl  = () => `ws://${esp}/ws`;
     const otaUrl = () => `http://${esp}/ota`;
+    const seqUrl = () => `http://${esp}/motorseq`;
 
     function add(text, cls) {
       const now = new Date();
@@ -156,24 +173,16 @@
 
     /* Telemetry batches arrive as packed binary WebSocket frames:
      *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
-     *   then, per sample: uint32 t_ms, followed by (field_count-1) float32 values
+     *   then, per sample: uint64 t_us, followed by (field_count-1) float32 values
      * The column order and the topic_id -> name mapping below MUST match the
      * per-topic packers in telemetry.c (telemetry_topic_pack). Column 0 (t) is
-     * always ms since boot; other fields are float32 (NaN => empty cell). */
+     * always microseconds since boot; other fields are float32 (NaN => empty cell). */
     const TOPIC_BY_ID = ['imu', 'angles', 'motors'];
     const TOPICS = {
       imu:    ['t', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp', 'ok'],
       angles: ['t', 'roll', 'pitch', 'roll_sp', 'pitch_sp'],
       motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR'],
     };
-    /* Decimal places per column for the CSV (mirrors the old firmware precision).
-     * Column 0 (t) is handled specially: ms -> seconds with 3 decimals. */
-    const FMT = {
-      imu:    [3, 3, 3, 3, 2, 2, 2, 1, 0],
-      angles: [3, 4, 4, 4, 4],
-      motors: [3, 3, 3, 3, 3, 2, 2],
-    };
-
     /* Turn one batch row into a flat object keyed by the topic's columns. */
     function rowToObj(cols, row) {
       const o = {};
@@ -182,7 +191,7 @@
     }
 
     /* Decode one packed binary batch into { topic, cols, rows } where each row is
-     * a numeric array in the topic's column order (t in ms, NaN for empty). */
+     * a numeric array in the topic's column order (t in us, NaN for empty). */
     function decodeBatch(buf) {
       const dv = new DataView(buf);
       const topic = TOPIC_BY_ID[dv.getUint8(0)];
@@ -194,7 +203,7 @@
       let off = 4;
       for (let i = 0; i < ns; i++) {
         const r = new Array(nf);
-        r[0] = dv.getUint32(off, true); off += 4;   /* t in ms */
+        r[0] = Number(dv.getBigUint64(off, true)); off += 8;   /* t in us */
         for (let j = 1; j < nf; j++) { r[j] = dv.getFloat32(off, true); off += 4; }
         rows.push(r);
       }
@@ -218,8 +227,12 @@
           const imu = d.imu_ok
             ? ` imu a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
             : ' imu:off';
+          const on = (x) => (x ? 'ON' : 'OFF');
+          let mode = d.cmode !== undefined
+            ? ` mode=${d.cmode} est=${on(d.est)} mctrl=${on(d.mctrl)}` : '';
+          if (d.play_len) mode += ` play=${d.play_pos}/${d.play_len}${d.play ? '(running)' : ''}`;
           add(`stats: rate=${d.rate}Hz mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]% ` +
-              `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}`, 'resp');
+              `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}${mode}`, 'resp');
         } else if (d.type === 'warn') {
           add('WARN: ' + d.text, 'warn');
         } else if (d.type === 'resp') {
@@ -271,12 +284,12 @@
       return `${topic}_${date}_${time}.csv`;
     }
 
-    /* Format one decoded cell for the CSV: t (col 0) is ms -> seconds, NaN is an
-     * empty cell, everything else uses the topic's per-column decimal places. */
+    /* Format one decoded cell for the CSV: t (col 0) is us -> seconds, NaN is an
+     * empty cell, everything else is written to 6 decimal places. */
     function fmtCell(topic, j, v) {
-      if (j === 0) return (v / 1000).toFixed(3);   /* t: ms -> s */
+      if (j === 0) return (v / 1e6).toFixed(6);   /* t: us -> s */
       if (Number.isNaN(v)) return '';
-      return v.toFixed(FMT[topic][j]);
+      return v.toFixed(6);
     }
 
     function batchToCsv(topic, cols, rows) {
@@ -381,6 +394,28 @@
       };
       xhr.onerror = () => { stat.textContent = 'upload error (connection lost)'; };
       xhr.send(f);
+    }
+
+    /* Send a per-tick motor script (CSV/txt) to the ESP32; it plays back one row
+     * per control tick in TEST_MOTORS. Body is text/plain so the browser skips
+     * the CORS preflight for this simple request. */
+    function uploadSeq() {
+      const f = document.getElementById('seqfile').files[0];
+      const stat = document.getElementById('seqstat');
+      if (!f) { stat.textContent = 'pick a .csv/.txt file first'; return; }
+      stat.textContent = 'uploading...';
+      f.text().then((body) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', seqUrl());
+        xhr.setRequestHeader('Content-Type', 'text/plain');
+        xhr.onload = () => {
+          stat.textContent = xhr.responseText || xhr.status;
+          add((xhr.status === 200 ? 'motor script: ' : 'motor script failed: ') +
+              (xhr.responseText || xhr.status), 'resp');
+        };
+        xhr.onerror = () => { stat.textContent = 'upload error (connection lost)'; };
+        xhr.send(body);
+      });
     }
 
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendCmd(); });

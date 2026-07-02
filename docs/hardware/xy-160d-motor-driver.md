@@ -11,13 +11,14 @@ logic) that drives our **two DC gear motors** - one per wheel. The ESP32 tells i
 | Parameter | Value | Why it matters here |
 |-----------|-------|---------------------|
 | Channels | 2 | One per wheel - exactly what we need |
-| Motor supply | DC 6.5 - 27 V | Run motors from a battery (e.g. 2S/3S Li-ion, 7.4-12 V) |
+| Motor supply | DC 7 - 24 V (limit 6.5 - 27 V) | Run motors from a battery (e.g. 2S/3S Li-ion, 7.4-12 V) |
 | Logic supply | DC 3.3 - 5 V | Powers the board's logic side. **Power this from 3.3 V** (see note below) so the ESP32's 3.3 V signals are full-scale against the logic rail |
-| Logic level | High = 3.0 - 6.5 V | At 5 V logic supply, a 3.3 V GPIO sits at the bottom of the input range and is unreliable (esp. the PWM `EN` pin). Powering the logic side at 3.3 V fixes this - no level shifter needed |
+| Logic level | High = 3.0 - 6.5 V, Low = 0 - 0.8 V | At 5 V logic supply, a 3.3 V GPIO sits at the bottom of the input range and is unreliable (esp. the PWM `EN` pin). Powering the logic side at 3.3 V fixes this - no level shifter needed |
+| Control input current | 3 - 11 mA / pin | Well within an ESP32 GPIO's drive limit |
 | Continuous current | 7 A / channel | Plenty for small gear motors |
 | Peak current | 50 A | Handles stall/startup surges |
 | PWM frequency | **0 - 10 kHz** | **Hard ceiling. Keep motor PWM <= 10 kHz** (the earlier "20 kHz" note is wrong for this board) |
-| Min pulse width | ~10 us | Limits usable duty resolution at high PWM rates |
+| Min pulse width | 5 us | Limits usable duty resolution at high PWM rates |
 
 ---
 
@@ -27,7 +28,7 @@ logic) that drives our **two DC gear motors** - one per wheel. The ESP32 tells i
 
 | Label | Connects to |
 |-------|-------------|
-| `9-24V` (VIN +) | Battery **+** (motor supply, 6.5-27 V) |
+| `9-24V` (VIN +) | Battery **+** (motor supply, 7-24 V; limit 6.5-27 V) |
 | `PGND` (VIN -) | Battery **-** |
 | `OUT1` / `OUT2` | Left motor (channel 1) +/- |
 | `OUT3` / `OUT4` | Right motor (channel 2) +/- |

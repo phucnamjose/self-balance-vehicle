@@ -50,3 +50,18 @@ bool control_estimation_enabled(void);
 void control_set_estimation(bool on);
 bool control_controller_enabled(void);
 void control_set_controller(bool on);
+
+/* Scripted open-loop motor playback (TEST_MOTORS only). Load a list of steps,
+ * each "hold (mL,mR) for dur seconds" (mL,mR each -1..+1, at most PLAYBACK_MAX
+ * steps). On start() the player's clock begins at 0; it applies each step for
+ * its duration in turn, then parks the motors. Fill the list incrementally:
+ * begin() clears it, append() adds a step (returns the new count, -1 when full,
+ * -2 if dur <= 0), start() plays from the top, stop() halts and parks.
+ * active()/len()/pos() report progress (len/pos are step counts). */
+void control_playback_begin(void);
+int  control_playback_append(float dur, float mL, float mR);
+void control_playback_start(void);
+void control_playback_stop(void);
+bool control_playback_active(void);
+int  control_playback_len(void);
+int  control_playback_pos(void);

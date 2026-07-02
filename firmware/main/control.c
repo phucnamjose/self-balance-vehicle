@@ -54,6 +54,20 @@ static volatile bool     s_stop_req;     /* ask the loop to exit at a safe point
 static volatile bool     s_est_enabled;  /* run the orientation (roll/pitch) estimate */
 static volatile bool     s_ctrl_enabled; /* run the wheel/motor controller */
 
+/* Scripted open-loop playback (TEST_MOTORS): a list of steps, each "hold (mL,mR)
+ * for D seconds". The player starts its clock at 0 and applies each step in turn
+ * for its duration, then parks the motors. Durations are stored as cumulative
+ * end times (t_end) so the loop just slides to the first step not yet finished.
+ * The buffer is static so the loop never touches freed memory (the uploader
+ * fills it while stopped, publishing s_play_len last). */
+typedef struct { float t_end, mL, mR; } play_pt_t;   /* t_end: step end, s from start */
+#define PLAYBACK_MAX 20
+static play_pt_t         s_play[PLAYBACK_MAX];
+static volatile int      s_play_len;     /* number of loaded steps */
+static volatile int      s_play_idx;     /* index of the active step */
+static volatile bool     s_play_active;  /* playback running */
+static int64_t           s_play_t0_us;   /* esp_timer time when playback started */
+
 /* ISR context: keep it minimal - just wake the control task for the next tick. */
 static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
                                      const gptimer_alarm_event_data_t *edata,
@@ -162,14 +176,32 @@ static void control_task(void *arg)
         }
 
         /* Motor commands. With the controller enabled they come from the wheel
-         * controller; otherwise they are the open-loop effort set from the web
-         * terminal ('motor'/'stop'). ('stop' only zeroes the open-loop command;
-         * STOP_CONTROL deletes this task entirely.) */
+         * controller. Otherwise it's open loop: a loaded playback script (one
+         * (mL,mR) entry per tick) takes priority, else the effort set from the
+         * web terminal ('motor'/'stop'). ('stop' only zeroes the open-loop
+         * command; STOP_CONTROL deletes this task entirely.) */
         float cmdL, cmdR;
         if (s_ctrl_enabled) {
             /* TODO: wheel/velocity controller -> cmdL, cmdR from setpoints. */
             cmdL = 0.0f;
             cmdR = 0.0f;
+        } else if (s_play_active) {
+            /* Time-based playback: slide past any steps that have finished and
+             * apply the current one; park once the last step's duration elapses. */
+            float elapsed = (float)(now_us - s_play_t0_us) * 1e-6f;
+            int i = s_play_idx;
+            while (i < s_play_len && elapsed >= s_play[i].t_end) i++;
+            s_play_idx = i;
+            if (i >= s_play_len) {
+                s_play_active = false;      /* end of script: park + open loop */
+                motor_cmd_set(0, 0.0f);
+                motor_cmd_set(1, 0.0f);
+                cmdL = 0.0f;
+                cmdR = 0.0f;
+            } else {
+                cmdL = s_play[i].mL;
+                cmdR = s_play[i].mR;
+            }
         } else {
             cmdL = motor_cmd_get(0);
             cmdR = motor_cmd_get(1);
@@ -338,3 +370,45 @@ bool control_estimation_enabled(void) { return s_est_enabled; }
 void control_set_estimation(bool on)  { s_est_enabled = on; }
 bool control_controller_enabled(void) { return s_ctrl_enabled; }
 void control_set_controller(bool on)  { s_ctrl_enabled = on; }
+
+void control_playback_begin(void)
+{
+    s_play_active = false;   /* stop the loop touching it before we refill */
+    s_play_idx = 0;
+    s_play_len = 0;
+}
+
+int control_playback_append(float dur, float mL, float mR)
+{
+    if (s_play_len >= PLAYBACK_MAX) return -1;
+    if (dur <= 0.0f) return -2;             /* a step must last a positive time */
+    if (mL >  1.0f) mL =  1.0f; else if (mL < -1.0f) mL = -1.0f;
+    if (mR >  1.0f) mR =  1.0f; else if (mR < -1.0f) mR = -1.0f;
+    int i = s_play_len;
+    float prev_end = (i > 0) ? s_play[i - 1].t_end : 0.0f;
+    s_play[i].t_end = prev_end + dur;       /* durations -> cumulative end time */
+    s_play[i].mL    = mL;
+    s_play[i].mR    = mR;
+    s_play_len = i + 1;      /* publish last so the loop only sees full entries */
+    return s_play_len;
+}
+
+void control_playback_start(void)
+{
+    if (s_play_len > 0) {
+        s_play_idx    = 0;
+        s_play_t0_us  = esp_timer_get_time();   /* clock starts at 0 */
+        s_play_active = true;
+    }
+}
+
+void control_playback_stop(void)
+{
+    s_play_active = false;
+    motor_cmd_set(0, 0.0f);
+    motor_cmd_set(1, 0.0f);
+}
+
+bool control_playback_active(void) { return s_play_active; }
+int  control_playback_len(void)    { return s_play_len; }
+int  control_playback_pos(void)    { return s_play_idx; }

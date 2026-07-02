@@ -98,8 +98,8 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     if (strcmp(cmd, "help") == 0) {
         ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | stop | "
                       "control start | control stop | exp motors|motor-ctrl|angles | "
-                      "est on|off | ctrl on|off | enc reset | stream on | stream off | "
-                      "rollback | (flashing requires STOP_CONTROL)");
+                      "est on|off | ctrl on|off | play | play stop | enc reset | "
+                      "stream on | stream off | rollback | (flashing requires STOP_CONTROL)");
     } else if (strcmp(cmd, "exp motors") == 0) {
         control_set_experiment(TEST_MOTORS);
         reply_experiment(req);
@@ -123,6 +123,17 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "ctrl off") == 0) {
         control_set_controller(false);
         reply_experiment(req);
+    } else if (strcmp(cmd, "play stop") == 0) {
+        control_playback_stop();
+        ws_reply(req, "playback stopped, motors parked");
+    } else if (strcmp(cmd, "play") == 0) {
+        control_playback_start();     /* no-op if nothing is loaded */
+        char msg[80];
+        snprintf(msg, sizeof(msg), "playback: step %d/%d, %s",
+                 control_playback_pos(), control_playback_len(),
+                 control_playback_active() ? "running" :
+                     (control_playback_len() ? "idle" : "empty (POST /motorseq)"));
+        ws_reply(req, msg);
     } else if (strcmp(cmd, "enc reset") == 0) {
         encoder_reset(0);
         encoder_reset(1);
@@ -201,10 +212,13 @@ static void handle_command(httpd_req_t *req, const char *cmd)
          * 'stats' shows both the loop numbers and what the loop is running. */
         if (n > 0 && n < (int)sizeof(json) && json[n - 1] == '}') {
             snprintf(json + n - 1, sizeof(json) - (n - 1),
-                     ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d}",
+                     ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d,"
+                     "\"play\":%d,\"play_pos\":%d,\"play_len\":%d}",
                      control_mode() == START_CONTROL ? "START_CONTROL" : "STOP_CONTROL",
                      control_estimation_enabled() ? 1 : 0,
-                     control_controller_enabled() ? 1 : 0);
+                     control_controller_enabled() ? 1 : 0,
+                     control_playback_active() ? 1 : 0,
+                     control_playback_pos(), control_playback_len());
         }
         ws_send_text(req, json);
     } else if (strcmp(cmd, "stream on") == 0) {
@@ -412,6 +426,106 @@ static esp_err_t ota_options_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
+/* Upper bound on the uploaded sequence text. 4000 ticks * ~24 chars/line leaves
+ * generous room; refuse anything larger so a bad request can't exhaust the heap. */
+#define SEQ_MAX_BODY  (96 * 1024)
+
+/* POST /motorseq - import a step-based open-loop motor script and play it.
+ *
+ * Body is plain text, one step per line: "dur,mL,mR" (comma or whitespace
+ * separated) where dur is how long to hold that output in seconds (> 0) and
+ * mL,mR are in -1..+1. Blank lines and lines starting with '#' are ignored.
+ * Only allowed in START_CONTROL + TEST_MOTORS (estimation and controller both
+ * off); the loop then applies each step for its duration, then parks. */
+static esp_err_t motorseq_post_handler(httpd_req_t *req)
+{
+    if (control_mode() != START_CONTROL ||
+        control_estimation_enabled() || control_controller_enabled()) {
+        set_cors(req);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_sendstr(req, "motor sequence needs START_CONTROL + TEST_MOTORS "
+                                "(send 'control start' and 'exp motors')");
+        return ESP_OK;
+    }
+
+    int total = req->content_len;
+    if (total <= 0 || total > SEQ_MAX_BODY) {
+        set_cors(req);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "empty or too-large sequence file");
+        return ESP_OK;
+    }
+
+    char *body = malloc(total + 1);
+    if (body == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+    int off = 0;
+    while (off < total) {
+        int got = httpd_req_recv(req, body + off, total - off);
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (got <= 0) {
+            free(body);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv error");
+            return ESP_FAIL;
+        }
+        off += got;
+    }
+    body[total] = '\0';
+
+    /* Commas -> spaces so a single "%f %f" scan handles CSV and whitespace. */
+    for (int i = 0; i < total; i++) if (body[i] == ',') body[i] = ' ';
+
+    control_playback_begin();
+    int loaded = 0, bad = 0, truncated = 0;
+    float total_s = 0.0f;
+    char *save = NULL;
+    for (char *ln = strtok_r(body, "\r\n", &save); ln; ln = strtok_r(NULL, "\r\n", &save)) {
+        while (*ln == ' ' || *ln == '\t') ln++;
+        if (*ln == '\0' || *ln == '#') continue;          /* blank / comment */
+        float dur, mL, mR;
+        if (sscanf(ln, "%f %f %f", &dur, &mL, &mR) != 3) { bad++; continue; }
+        int r = control_playback_append(dur, mL, mR);
+        if (r == -1) { truncated = 1; break; }             /* buffer full */
+        if (r == -2) { bad++; continue; }                  /* non-positive duration */
+        total_s += dur;
+        loaded++;
+    }
+    free(body);
+
+    char msg[160];
+    if (loaded == 0) {
+        control_playback_begin();
+        snprintf(msg, sizeof(msg), "no valid rows (skipped %d bad line(s); "
+                 "expected 'dur,mL,mR' with dur > 0)", bad);
+        set_cors(req);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, msg);
+        return ESP_OK;
+    }
+
+    control_playback_start();
+    snprintf(msg, sizeof(msg),
+             "loaded %d steps (%.2f s total), skipped %d bad; playing now%s",
+             loaded, (double)total_s, bad,
+             truncated ? " (truncated: max 20 steps)" : "");
+    ESP_LOGI(TAG, "motorseq: %s", msg);
+    set_cors(req);
+    httpd_resp_sendstr(req, msg);
+    return ESP_OK;
+}
+
+/* CORS preflight for /motorseq (cross-origin POST). */
+static esp_err_t motorseq_options_handler(httpd_req_t *req)
+{
+    set_cors(req);
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "*");
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 void start_webserver(void)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -440,6 +554,14 @@ void start_webserver(void)
     httpd_uri_t ota_opt = { .uri = "/ota", .method = HTTP_OPTIONS,
                             .handler = ota_options_handler };
     httpd_register_uri_handler(s_httpd, &ota_opt);
+
+    httpd_uri_t seq = { .uri = "/motorseq", .method = HTTP_POST,
+                        .handler = motorseq_post_handler };
+    httpd_register_uri_handler(s_httpd, &seq);
+
+    httpd_uri_t seq_opt = { .uri = "/motorseq", .method = HTTP_OPTIONS,
+                            .handler = motorseq_options_handler };
+    httpd_register_uri_handler(s_httpd, &seq_opt);
 
     ESP_LOGI(TAG, "HTTP + WebSocket + OTA server up");
 }
