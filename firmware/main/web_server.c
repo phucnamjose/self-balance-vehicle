@@ -98,8 +98,9 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     if (strcmp(cmd, "help") == 0) {
         ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | stop | "
                       "control start | control stop | exp motors|motor-ctrl|angles | "
-                      "est on|off | ctrl on|off | play | play stop | enc reset | "
-                      "stream on | stream off | rollback | (flashing requires STOP_CONTROL)");
+                      "est on|off | ctrl on|off | play | play stop | deadband | "
+                      "deadband stop | enc reset | stream on | stream off | rollback | "
+                      "(flashing requires STOP_CONTROL)");
     } else if (strcmp(cmd, "exp motors") == 0) {
         control_set_experiment(TEST_MOTORS);
         reply_experiment(req);
@@ -123,6 +124,21 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "ctrl off") == 0) {
         control_set_controller(false);
         reply_experiment(req);
+    } else if (strcmp(cmd, "deadband stop") == 0) {
+        control_deadband_stop();
+        ws_reply(req, "deadband sweep stopped, motors parked");
+    } else if (strcmp(cmd, "deadband") == 0) {
+        /* Slow ramp to find each wheel's start-moving duty; needs the open-loop
+         * motor test (same gate as the motor sequence uploader). */
+        if (control_mode() != START_CONTROL ||
+            control_estimation_enabled() || control_controller_enabled()) {
+            ws_reply(req, "deadband needs START_CONTROL + TEST_MOTORS "
+                          "(send 'control start' and 'exp motors')");
+            return;
+        }
+        control_deadband_start();
+        ws_reply(req, "deadband sweep started: ramping 0->15% forward then reverse, "
+                      "result follows in a few seconds...");
     } else if (strcmp(cmd, "play stop") == 0) {
         control_playback_stop();
         ws_reply(req, "playback stopped, motors parked");

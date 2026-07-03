@@ -65,3 +65,13 @@ void control_playback_stop(void);
 bool control_playback_active(void);
 int  control_playback_len(void);
 int  control_playback_pos(void);
+
+/* Deadband sweep (TEST_MOTORS only). Slowly ramps both motors from 0 up to an
+ * internal ceiling, first forward then reverse, and latches the duty at which
+ * each wheel first turns (measured from its encoder). Report-only: when it
+ * finishes, the reporter task broadcasts the four thresholds (L/R, fwd/rev) to
+ * the terminal so the deadband constant can be updated during bring-up.
+ * start() begins the sweep, stop() aborts and parks, active() reports progress. */
+void control_deadband_start(void);
+void control_deadband_stop(void);
+bool control_deadband_active(void);

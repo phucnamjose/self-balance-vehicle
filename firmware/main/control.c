@@ -68,6 +68,25 @@ static volatile int      s_play_idx;     /* index of the active step */
 static volatile bool     s_play_active;  /* playback running */
 static int64_t           s_play_t0_us;   /* esp_timer time when playback started */
 
+/* Deadband sweep (TEST_MOTORS): ramp both motors slowly from 0 up to DB_MAX,
+ * first forward then reverse, and for each wheel latch the duty at which it
+ * first turns (encoder moves past DB_MOVE_COUNTS). Report-only: it measures the
+ * per-wheel, per-direction deadband thresholds and streams them to the terminal
+ * so the operator can update the controller's deadband constant during bring-up.
+ * Runs entirely in the control loop; the reporter emits the result once done. */
+#define DB_MAX          0.15f   /* ramp ceiling (15% duty); wheels usually move well before this */
+#define DB_RAMP_RATE    0.01f   /* duty/second: 0 -> DB_MAX over ~15 s for fine resolution */
+#define DB_MOVE_COUNTS  5       /* encoder counts (~1.4 deg) that count as "the wheel turned" */
+#define DB_SETTLE_S     0.5f    /* park time between the forward and reverse phases */
+enum { DB_PHASE_FWD, DB_PHASE_SETTLE, DB_PHASE_REV };   /* sweep phases */
+static volatile bool s_db_active;        /* sweep running */
+static volatile bool s_db_report;        /* sweep finished: reporter should emit the result */
+static int     s_db_phase;               /* current sweep phase (DB_PHASE_*) */
+static int64_t s_db_t0_us;               /* esp_timer time the current phase started */
+static int64_t s_db_start_cnt[2];        /* encoder counts at the phase start (per wheel) */
+static float   s_db_thresh[2][2];        /* latched threshold duty [wheel][0=fwd,1=rev] */
+static bool    s_db_found[2][2];         /* whether that wheel/direction has tripped yet */
+
 /* ISR context: keep it minimal - just wake the control task for the next tick. */
 static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
                                      const gptimer_alarm_event_data_t *edata,
@@ -100,6 +119,63 @@ static void start_control_timer(void)
     };
     ESP_ERROR_CHECK(gptimer_set_alarm_action(s_timer, &alarm));
     ESP_ERROR_CHECK(gptimer_start(s_timer));
+}
+
+/* One tick of the deadband sweep: ramp the active direction and, per wheel,
+ * latch the duty where the encoder first moves. Freezes a wheel at 0 as soon as
+ * it trips so it does not race while the other is still ramping. Advances
+ * forward -> settle -> reverse -> done, publishing s_db_report at the end. */
+static void deadband_step(int64_t now_us, float *cmdL, float *cmdR)
+{
+    float elapsed = (float)(now_us - s_db_t0_us) * 1e-6f;
+    *cmdL = 0.0f;
+    *cmdR = 0.0f;
+
+    if (s_db_phase == DB_PHASE_SETTLE) {   /* park, then re-baseline for reverse */
+        if (elapsed >= DB_SETTLE_S) {
+            s_db_phase = DB_PHASE_REV;
+            s_db_t0_us = now_us;
+            s_db_start_cnt[0] = encoder_count(0);
+            s_db_start_cnt[1] = encoder_count(1);
+        }
+        return;
+    }
+
+    int   dir = (s_db_phase == DB_PHASE_FWD) ? 0 : 1;
+    float sgn = (s_db_phase == DB_PHASE_FWD) ? 1.0f : -1.0f;
+    float duty = DB_RAMP_RATE * elapsed;
+    if (duty > DB_MAX) duty = DB_MAX;
+
+    float cmd[2] = { 0.0f, 0.0f };
+    for (int i = 0; i < 2; i++) {
+        if (!s_db_found[i][dir]) {
+            int64_t moved = encoder_count(i) - s_db_start_cnt[i];
+            if (moved < 0) moved = -moved;
+            if (moved >= DB_MOVE_COUNTS) {
+                s_db_thresh[i][dir] = duty;
+                s_db_found[i][dir]  = true;
+            }
+        }
+        cmd[i] = s_db_found[i][dir] ? 0.0f : sgn * duty;
+    }
+
+    bool done = (s_db_found[0][dir] && s_db_found[1][dir]) || duty >= DB_MAX;
+    if (done) {
+        for (int i = 0; i < 2; i++) {
+            if (!s_db_found[i][dir]) s_db_thresh[i][dir] = DB_MAX;   /* never moved */
+        }
+        cmd[0] = 0.0f;
+        cmd[1] = 0.0f;
+        if (s_db_phase == DB_PHASE_FWD) {
+            s_db_phase = DB_PHASE_SETTLE;
+            s_db_t0_us = now_us;
+        } else {
+            s_db_active = false;    /* reverse done: park and hand off to reporter */
+            s_db_report = true;
+        }
+    }
+    *cmdL = cmd[0];
+    *cmdR = cmd[1];
 }
 
 /* High-priority task woken by the timer ISR every 1/CONTROL_HZ seconds. Records
@@ -185,6 +261,9 @@ static void control_task(void *arg)
             /* TODO: wheel/velocity controller -> cmdL, cmdR from setpoints. */
             cmdL = 0.0f;
             cmdR = 0.0f;
+        } else if (s_db_active) {
+            /* Deadband sweep takes priority over playback/manual while running. */
+            deadband_step(now_us, &cmdL, &cmdR);
         } else if (s_play_active) {
             /* Time-based playback: slide past any steps that have finished and
              * apply the current one; park once the last step's duration elapses. */
@@ -277,6 +356,34 @@ static void emit_pending_warning(void)
     ws_broadcast(json);
 }
 
+/* Announce the deadband sweep's four thresholds once the control loop finishes,
+ * off the real-time path. A wheel that never moved before the DB_MAX cap is
+ * reported as ">=DB_MAX" rather than a spurious number. */
+static void emit_deadband_result(void)
+{
+    if (!s_db_report) return;
+    s_db_report = false;
+
+    /* Column order L+, L-, R+, R-  ->  [wheel][0=fwd,1=rev]. */
+    const int wi[4] = { 0, 0, 1, 1 };
+    const int di[4] = { 0, 1, 0, 1 };
+    char cell[4][12];
+    for (int k = 0; k < 4; k++) {
+        if (s_db_found[wi[k]][di[k]]) {
+            snprintf(cell[k], sizeof(cell[k]), "%.3f", (double)s_db_thresh[wi[k]][di[k]]);
+        } else {
+            snprintf(cell[k], sizeof(cell[k]), ">=%.2f", (double)DB_MAX);
+        }
+    }
+    char msg[160];
+    snprintf(msg, sizeof(msg), "deadband (duty): L +%s / -%s   R +%s / -%s",
+             cell[0], cell[1], cell[2], cell[3]);
+    ESP_LOGI(TAG, "%s", msg);
+    char json[256];
+    snprintf(json, sizeof(json), "{\"type\":\"resp\",\"text\":\"%s\"}", msg);
+    ws_broadcast(json);
+}
+
 /* Runs on core 0. Blocks until the control task hands over a full buffer, then:
  * emits any pending timing warning, caches the latest sample for the web
  * server, and streams the whole batch to connected clients to be saved. */
@@ -293,6 +400,9 @@ static void reporter_task(void *arg)
 
         /* Speak up only if the control loop flagged out-of-range periods. */
         emit_pending_warning();
+
+        /* Announce the deadband sweep result when the loop has finished one. */
+        emit_deadband_result();
 
         /* Pack one binary frame per telemetry topic and stream it to any
          * connected WebSocket clients so the page can record each to its own
@@ -412,3 +522,26 @@ void control_playback_stop(void)
 bool control_playback_active(void) { return s_play_active; }
 int  control_playback_len(void)    { return s_play_len; }
 int  control_playback_pos(void)    { return s_play_idx; }
+
+void control_deadband_start(void)
+{
+    s_play_active = false;             /* don't let playback fight the sweep */
+    for (int i = 0; i < 2; i++) {
+        for (int d = 0; d < 2; d++) { s_db_thresh[i][d] = 0.0f; s_db_found[i][d] = false; }
+    }
+    s_db_phase   = DB_PHASE_FWD;
+    s_db_t0_us   = esp_timer_get_time();
+    s_db_start_cnt[0] = encoder_count(0);
+    s_db_start_cnt[1] = encoder_count(1);
+    s_db_report  = false;
+    s_db_active  = true;               /* publish last so the loop only sees a ready state */
+}
+
+void control_deadband_stop(void)
+{
+    s_db_active = false;
+    motor_cmd_set(0, 0.0f);
+    motor_cmd_set(1, 0.0f);
+}
+
+bool control_deadband_active(void) { return s_db_active; }
