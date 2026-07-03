@@ -67,7 +67,8 @@ function R = motor_id(csvfile)
            s, w_noload, w_noload*60/(2*pi), tau_stall, p.I_wheel);
   end
 
-  outpng = fullfile(fileparts(csvfile), 'motor_id_fit.png');
+  [csvdir, csvbase] = fileparts(csvfile);
+  outpng = fullfile(csvdir, [csvbase '.png']);   % same name as the CSV, .png
   plot_fits(t, w, u, R, outpng);
 end
 
