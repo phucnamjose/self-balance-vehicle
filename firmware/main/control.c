@@ -66,6 +66,7 @@ static play_pt_t         s_play[PLAYBACK_MAX];
 static volatile int      s_play_len;     /* number of loaded steps */
 static volatile int      s_play_idx;     /* index of the active step */
 static volatile bool     s_play_active;  /* playback running */
+static volatile bool     s_play_report;  /* playback finished on its own: reporter announces */
 static int64_t           s_play_t0_us;   /* esp_timer time when playback started */
 
 /* Deadband sweep (TEST_MOTORS): ramp both motors slowly from 0 up to DB_MAX,
@@ -273,6 +274,7 @@ static void control_task(void *arg)
             s_play_idx = i;
             if (i >= s_play_len) {
                 s_play_active = false;      /* end of script: park + open loop */
+                s_play_report = true;       /* reporter announces completion (core 0) */
                 motor_cmd_set(0, 0.0f);
                 motor_cmd_set(1, 0.0f);
                 cmdL = 0.0f;
@@ -384,6 +386,23 @@ static void emit_deadband_result(void)
     ws_broadcast(json);
 }
 
+/* Announce that a motor playback script ran to completion, once, off the
+ * real-time path. Manual 'play stop' does not set this (it has its own reply). */
+static void emit_playback_result(void)
+{
+    if (!s_play_report) return;
+    s_play_report = false;
+
+    float total = (s_play_len > 0) ? s_play[s_play_len - 1].t_end : 0.0f;
+    char msg[96];
+    snprintf(msg, sizeof(msg), "playback finished (%d steps, %.2f s), motors parked",
+             s_play_len, (double)total);
+    ESP_LOGI(TAG, "%s", msg);
+    char json[160];
+    snprintf(json, sizeof(json), "{\"type\":\"resp\",\"text\":\"%s\"}", msg);
+    ws_broadcast(json);
+}
+
 /* Runs on core 0. Blocks until the control task hands over a full buffer, then:
  * emits any pending timing warning, caches the latest sample for the web
  * server, and streams the whole batch to connected clients to be saved. */
@@ -403,6 +422,9 @@ static void reporter_task(void *arg)
 
         /* Announce the deadband sweep result when the loop has finished one. */
         emit_deadband_result();
+
+        /* Announce when a playback script has run to completion. */
+        emit_playback_result();
 
         /* Pack one binary frame per telemetry topic and stream it to any
          * connected WebSocket clients so the page can record each to its own
@@ -507,6 +529,7 @@ void control_playback_start(void)
 {
     if (s_play_len > 0) {
         s_play_idx    = 0;
+        s_play_report = false;                  /* clear any stale completion event */
         s_play_t0_us  = esp_timer_get_time();   /* clock starts at 0 */
         s_play_active = true;
     }
