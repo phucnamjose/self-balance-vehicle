@@ -18,6 +18,11 @@ static const char *TAG = "motors";
 #define MOTOR_R_IN1        GPIO_NUM_32            /* -> IN3 */
 #define MOTOR_R_IN2        GPIO_NUM_14            /* -> IN4 */
 
+/* Spin direction for a positive command. Flip to -1 if a wheel turns backwards
+ * relative to its encoder, so +cmd always gives +encoder counts (forward). */
+#define MOTOR_L_SIGN       (-1)
+#define MOTOR_R_SIGN       (+1)
+
 #define MOTOR_PWM_TIMER    LEDC_TIMER_1           /* dedicated LEDC timer for motor PWM */
 #define MOTOR_L_CHANNEL    LEDC_CHANNEL_1
 #define MOTOR_R_CHANNEL    LEDC_CHANNEL_2
@@ -30,11 +35,12 @@ typedef struct {
     gpio_num_t     pwm_gpio;   /* ENx */
     gpio_num_t     in1, in2;   /* direction pins */
     ledc_channel_t channel;    /* LEDC channel driving ENx */
+    int            sign;       /* +1 or -1: spin direction vs a positive command */
 } motor_t;
 
 static const motor_t s_motors[2] = {
-    { MOTOR_L_PWM, MOTOR_L_IN1, MOTOR_L_IN2, MOTOR_L_CHANNEL },   /* 0 = left  */
-    { MOTOR_R_PWM, MOTOR_R_IN1, MOTOR_R_IN2, MOTOR_R_CHANNEL },   /* 1 = right */
+    { MOTOR_L_PWM, MOTOR_L_IN1, MOTOR_L_IN2, MOTOR_L_CHANNEL, MOTOR_L_SIGN },   /* 0 = left  */
+    { MOTOR_R_PWM, MOTOR_R_IN1, MOTOR_R_IN2, MOTOR_R_CHANNEL, MOTOR_R_SIGN },   /* 1 = right */
 };
 
 /* Open-loop command per motor, -1.0..+1.0 (sign = direction). Set from the web
@@ -49,6 +55,7 @@ void motor_set(int i, float cmd)
     if (cmd >  1.0f) cmd =  1.0f;
     if (cmd < -1.0f) cmd = -1.0f;
     const motor_t *m = &s_motors[i];
+    cmd *= m->sign;
 
     if (cmd > 0.0f) {                 /* forward */
         gpio_set_level(m->in1, 1);

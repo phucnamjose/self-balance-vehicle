@@ -21,8 +21,8 @@ static const char *TAG = "encoders";
 /* The right wheel is mounted mirror-image to the left, so its encoder counts
  * down when the robot drives forward. Flip its sign so +counts = forward for
  * both wheels (keeps position and the velocity deltas consistent downstream). */
-#define ENC_L_SIGN         (+1)
-#define ENC_R_SIGN         (-1)
+#define ENC_L_SIGN         (-1)
+#define ENC_R_SIGN         (+1)
 
 /* One encoder. PCNT counts in hardware (16-bit); on each rollover the watch
  * callback adds the limit to accum, giving a full 64-bit position. The sign is
