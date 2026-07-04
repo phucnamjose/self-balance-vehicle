@@ -6,9 +6,9 @@ example, verify it on hardware, check it off, and write a short note.
 
 Status legend: `[ ]` todo &nbsp; `[~]` in progress &nbsp; `[x]` done
 
-> Current focus: **Phase 4 - encoders** are reading (PCNT). Next: drive the motors and
-> confirm encoder sign matches the spin direction, then characterize deadband/max speed.
-> Web terminal: `motor <l|r|both> <-100..100>` / `stop` / `enc reset`.
+> Current focus: **Phase 4 - encoders** are reading (PCNT) and the per-wheel
+> deadband is now auto-measured (`deadband` sweep). Next: characterize max speed.
+> Web terminal: `motor <l|r|both> <-100..100>` / `stop` / `deadband` / `enc reset`.
 > Code: `firmware/main/app_main.c`, `www/index.html`. Driver doc: `docs/hardware/xy-160d-motor-driver.md`.
 
 ---
@@ -40,16 +40,16 @@ Goal: trustworthy IMU data. (Calibration moved to Phase 8.)
 Goal: drive the real motors and command them remotely.
 
 - [x] Test PWM with 2 real motors
-- [~] Add a PC command to test the motor (direction, deadband, max speed)
+- [x] Add a PC command to test the motor (direction, deadband, max speed)
 - [x] Read encoder using timer - PCNT hardware counter (4x quadrature)
 - [x] Add a PC command to reset encoder count - `enc reset`
 
 ## Phase 5 - Build basic web app: states + log
 Goal: a dashboard to observe and poke the robot.
 
-- [ ] Show the states
-- [ ] Show the log in a log tab
-- [ ] Add a testing tab to test the PWM
+- [x] Show the states
+- [x] Show the log in a log tab
+- [x] Add a testing tab to test the PWM
 - [ ] Draw a line chart
 
 ## Phase 6 - Put ESP32 + MPU6050 on the robot
@@ -59,7 +59,7 @@ Goal: physical integration.
 - [ ] Connect the bus and lines (wiring)
 
 ## Phase 7 - Investigate the maths & algorithms
-Goal: understand the model before controlling it.
+Goal: understand the model before controlling it.s
 
 - [ ] Inverted pendulum model
 - [ ] Kalman filter for state estimation
@@ -74,7 +74,13 @@ Goal: make the robot stand stably
 
 - [ ] Calibrate the sensor (offsets / bias)
 - [ ] Apply estimation
-- [ ] Apply control
+- [ ] Apply control - cascade design documented in `theory/`. Build inner
+  to outer, one controller at a time:
+  - [~] Wheel speed controller (inner per-wheel angular-speed loop) - design done
+    (`theory/wheel-speed-controller.md`); firmware next
+  - [ ] Balance (standing) controller
+  - [ ] Mixer + yaw (drive straight / steer)
+  - [ ] Velocity controller (forward drive / station-keeping)
 
 ---
 
@@ -84,6 +90,9 @@ learned, where the code lives.
 
 | Date | Phase / Step | Notes |
 |------|--------------|-------|
+| 2026-07-04 | P4 S2 | Measured the deadband with the sweep: both motors start moving at ~10% duty. Saved `deadband = 0.10` as the constant (`simulation/params.m` `p.motor.deadband`, was 0.05 seed) and updated the control docs (`wheel-speed-controller.md`, `simulation/MAPPING.md`). |
+| 2026-07-03 | P4 S2 | Added a motor deadband finder (`deadband` WS command + "Find deadband" web button). In TEST_MOTORS it slowly ramps both motors 0->15% (rate 0.01 duty/s, ~15 s), latching per wheel the duty where its encoder first moves (>=5 counts), then repeats in reverse; reports the four thresholds (L +/-, R +/-) to the terminal. Report-only for now - feeds the deadband constant in `docs/theory/wheel-speed-controller.md`. State machine lives beside the playback player in `control.c`; result emitted from `reporter_task` (off the RT path, like the timing warning). |
+| 2026-06-28 | P9 / control | Documented the control design in `docs/theory/`: a cascade (inner wheel-speed loops under the balance loop) to absorb the two motors' mismatch so the robot drives straight. Added the `*_ctrl` naming scheme + architecture overview (`README.md`) and the detailed inner-loop design (`wheel-speed-controller.md`: rad/s in -> duty out, PI + feedforward + deadband, anti-windup, per-tick encoder rate, tuning/test plan). Wheel speed controller is step 1; firmware comes next. Docs only - no code changes. |
 | 2026-06-13 | P4 (done) | Both motors confirmed working on hardware. Root cause of the earlier "doesn't work": the XY-160D inputs are optocoupler-isolated, so its +5V logic pin must be powered (+ common ground); documented in the driver md. |
 | 2026-06-13 | docs | Added docs/hardware/gb37-520-dc-motor.md: GB37-520 12V 30:1 gear motor specs, the 2-ch Hall encoder (11 PPR/ch -> 1320 counts/wheel-rev at our 4x PCNT decoding), counts<->RPM/position formulas, 6-wire colour pinout (encoder powered from 3V3 for 3.3V-safe signals), and the L/R GPIO mapping. |
 | 2026-06-13 | docs | Added docs/hardware/esp32-board.md: intro to the ESP32 DevKit (WROOM-32, 4 MB), specs, power rules, the full project GPIO map, the complete 38-pin WROOM-32 DevKit pinout (ASCII header diagram verified against the real board + full GPIO function reference) annotated with our usage, pin gotchas (strapping, input-only, 16/17 PSRAM, ADC2+Wi-Fi), flashing/OTA, and which peripheral driver does what. Fixed an earlier wrong right-column order (top-right is GND, not GPIO23; two GNDs on the right; GPIO6 at bottom-right). |
