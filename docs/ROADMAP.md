@@ -6,10 +6,11 @@ example, verify it on hardware, check it off, and write a short note.
 
 Status legend: `[ ]` todo &nbsp; `[~]` in progress &nbsp; `[x]` done
 
-> Current focus: **Phase 4 - encoders** are reading (PCNT) and the per-wheel
-> deadband is now auto-measured (`deadband` sweep). Next: characterize max speed.
-> Web terminal: `motor <l|r|both> <-100..100>` / `stop` / `deadband` / `enc reset`.
-> Code: `firmware/main/app_main.c`, `www/index.html`. Driver doc: `docs/hardware/xy-160d-motor-driver.md`.
+> Current focus: **Phase 9 - control**. The inner **wheel-speed PI controller**
+> is now in firmware (`firmware/main/wheel_pi.c`) with per-wheel gains tuned on
+> hardware; enable it with `exp motor-ctrl` and drive it via `speed <l|r|both>
+> <rad/s>` (tune live with `gains <l|r|both> <kp> <ki>`). Next: the balance
+> (standing) controller. Controller design: `docs/theory/wheel-speed-controller.md`.
 
 ---
 
@@ -50,24 +51,27 @@ Goal: a dashboard to observe and poke the robot.
 - [x] Show the states
 - [x] Show the log in a log tab
 - [x] Add a testing tab to test the PWM
-- [ ] Draw a line chart
+- [x] Draw a line chart
 
 ## Phase 6 - Put ESP32 + MPU6050 on the robot
 Goal: physical integration.
 
-- [ ] Fix the kit and sensor on the robot
-- [ ] Connect the bus and lines (wiring)
+- [x] Fix the kit and sensor on the robot
+- [x] Connect the bus and lines (wiring)
 
 ## Phase 7 - Investigate the maths & algorithms
 Goal: understand the model before controlling it.s
 
-- [ ] Inverted pendulum model
+- [x] Motor identification
+- [ ] PI tuning for motor speed
 - [ ] Kalman filter for state estimation
+- [ ] Inverted pendulum model
+- [ ] Tuning for balancing
 
 ## Phase 8 - Simulate the model in MATLAB
 Goal: validate the model and tune control offline.
 
-- [ ] Build and run the MATLAB simulation
+- [ ] Build and run the Octave simulation
 
 ## Phase 9 - Run real system
 Goal: make the robot stand stably
@@ -76,8 +80,9 @@ Goal: make the robot stand stably
 - [ ] Apply estimation
 - [ ] Apply control - cascade design documented in `theory/`. Build inner
   to outer, one controller at a time:
-  - [~] Wheel speed controller (inner per-wheel angular-speed loop) - design done
-    (`theory/wheel-speed-controller.md`); firmware next
+  - [x] Wheel speed controller (inner per-wheel angular-speed loop) - design
+    (`theory/wheel-speed-controller.md`) + firmware (`firmware/main/wheel_pi.c`),
+    per-wheel gains tuned on hardware
   - [ ] Balance (standing) controller
   - [ ] Mixer + yaw (drive straight / steer)
   - [ ] Velocity controller (forward drive / station-keeping)
@@ -90,6 +95,7 @@ learned, where the code lives.
 
 | Date | Phase / Step | Notes |
 |------|--------------|-------|
+| 2026-07-06 | P9 / control | Implemented the inner **wheel-speed PI controller** in firmware. New `firmware/main/wheel_pi.c/.h`: per-wheel PI on the encoder speed error, deadband compensation (0.10), output cap +/-0.95, conditional-integration anti-windup, 8 ms measurement low-pass. Per-wheel gains tuned on hardware (L Kp=0.1437 Ki=0.7184 Ti=0.200; R Kp=0.1484 Ki=0.8020 Ti=0.185). Wired into `control.c` (runs on `exp motor-ctrl` / `ctrl on`; per-tick speed now computed before the command decision; integrator reset on the rising edge into closed loop). Telemetry carries per-wheel setpoints (motors topic `velL_sp`/`velR_sp` + JSON `wsetL`/`wsetR`). New WS commands `speed <l\|r\|both> <rad/s>` and `gains <l\|r\|both> <kp> <ki>`; `help` is now a multi-line guide. Tried a `w_set/w_noload` feedforward, then removed it - PI alone. |
 | 2026-07-04 | P4 S2 | Measured the deadband with the sweep: both motors start moving at ~10% duty. Saved `deadband = 0.10` as the constant (`simulation/params.m` `p.motor.deadband`, was 0.05 seed) and updated the control docs (`wheel-speed-controller.md`, `simulation/MAPPING.md`). |
 | 2026-07-03 | P4 S2 | Added a motor deadband finder (`deadband` WS command + "Find deadband" web button). In TEST_MOTORS it slowly ramps both motors 0->15% (rate 0.01 duty/s, ~15 s), latching per wheel the duty where its encoder first moves (>=5 counts), then repeats in reverse; reports the four thresholds (L +/-, R +/-) to the terminal. Report-only for now - feeds the deadband constant in `docs/theory/wheel-speed-controller.md`. State machine lives beside the playback player in `control.c`; result emitted from `reporter_task` (off the RT path, like the timing warning). |
 | 2026-06-28 | P9 / control | Documented the control design in `docs/theory/`: a cascade (inner wheel-speed loops under the balance loop) to absorb the two motors' mismatch so the robot drives straight. Added the `*_ctrl` naming scheme + architecture overview (`README.md`) and the detailed inner-loop design (`wheel-speed-controller.md`: rad/s in -> duty out, PI + feedforward + deadband, anti-windup, per-tick encoder rate, tuning/test plan). Wheel speed controller is step 1; firmware comes next. Docs only - no code changes. |
