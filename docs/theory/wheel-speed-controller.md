@@ -74,9 +74,10 @@ duty     = clamp(duty, -1, +1)            # output saturation (PWM/actuator limi
 
 ### Feedforward
 
-The motor model in [../../simulation/params.m](../../simulation/params.m) is
-roughly linear from duty to speed, so a near-correct duty for a target speed is
-known in advance:
+The motor model (`G_m(s) = K/(tau*s+1)`, measured per
+[motor-identification.md](motor-identification.md) and seeded in
+[../../simulation/params.m](../../simulation/params.m)) is roughly linear from
+duty to speed, so a near-correct duty for a target speed is known in advance:
 
 ```
 ff(w_set) = w_set / w_noload          # w_noload = 333 * 2*pi/60 ~= 34.9 rad/s
@@ -138,6 +139,10 @@ bring-up against real encoder data.
   belong in this controller.
 
 ## Gains and tuning
+
+For the analytic starting point - pick `Kp`, `Ki` directly from the identified
+`K`, `tau` by pole-zero cancellation, with a Nyquist stability check - see
+[pi-tuning.md](pi-tuning.md). The hardware procedure below then fine-tunes it.
 
 Start conservative and tune one wheel at a time:
 

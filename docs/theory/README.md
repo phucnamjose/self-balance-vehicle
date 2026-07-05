@@ -72,7 +72,8 @@ foundation the rest of the stack stands on, so it comes first.
 
 > The diagram is the continuous-time idealization used for design and tuning. On
 > the robot it runs discretely - inner speed + balance loops at 200 Hz, the outer
-> velocity/yaw loops sub-rated to ~50 Hz (see the loop-rate notes when added).
+> velocity/yaw loops sub-rated to ~50 Hz. The whole rate stack (PWM, IMU, control
+> tick, cascade sub-rates, telemetry) is designed in [loop-rates.md](loop-rates.md).
 
 ## Naming scheme
 
@@ -96,6 +97,8 @@ Convention: a **common** quantity drives both wheels the same (forward motion); 
 
 Each controller links to its own design doc as it is written.
 
+0. [motor-identification.md](motor-identification.md) - measure the plant
+   `G_m(s)` (duty -> wheel speed) on hardware. **(done)**
 1. [wheel-speed-controller.md](wheel-speed-controller.md) - inner per-wheel
    angular-speed loop. **(current step)**
 2. `balance_ctrl` - standing/tilt loop. *(later)*
