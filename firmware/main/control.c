@@ -13,12 +13,18 @@
 #include "imu.h"
 #include "motors.h"
 #include "encoders.h"
+#include "wheel_pi.h"
 #include "web_server.h"
 
 static const char *TAG = "control";
 
 #define TIMER_RES_HZ   1000000                   /* 1 MHz -> 1 tick = 1 us */
 #define ALARM_COUNT    (TIMER_RES_HZ / CONTROL_HZ)
+
+/* Wheel speed is a finite difference of encoder counts over a sliding window of
+ * this many ticks (not a single tick): averaging cuts the count-quantization
+ * noise a 1-tick difference shows at 200 Hz. Window spans VEL_WIN-1 intervals. */
+#define VEL_WIN        4
 
 /* Scratch buffer for one packed telemetry frame. The largest topic (imu, 9
  * fields) is 4 + SAMPLES_PER_BATCH*(8 + 8*4) bytes (~4 KB at 100 samples, the
@@ -215,9 +221,15 @@ static void control_task(void *arg)
     }
 
     imu_t imu = { 0 };             /* latest IMU sample */
-    int64_t pos_last[2] = { 0 };   /* encoder counts at the previous tick */
+    /* Ring buffer of the last VEL_WIN ticks' counts + timestamps, for the
+     * windowed wheel-speed estimate below. */
+    int64_t vel_hist_t[VEL_WIN] = { 0 };
+    int64_t vel_hist[2][VEL_WIN] = { { 0 } };
+    int     vel_head = 0;          /* next slot to write */
+    int     vel_n = 0;             /* samples buffered so far (<= VEL_WIN) */
     int64_t last_us = esp_timer_get_time();   /* timestamp of the previous tick */
     bool    primed = false;        /* skip the warning check on the first tick */
+    bool    ctrl_was = false;      /* previous tick's controller-enabled state */
     int     active = 0;            /* buffer we are currently writing into */
     int     idx = 0;               /* next slot in the active buffer */
 
@@ -252,16 +264,48 @@ static void control_task(void *arg)
             /* TODO: complementary / Kalman filter from imu -> roll, pitch. */
         }
 
+        /* Wheel angular speed (rad/s), computed before the command decision so
+         * the wheel-speed controller can act on it this same tick. It is a
+         * finite difference over a VEL_WIN-sample window: push this tick's counts
+         * + timestamp into the ring, then divide the newest-minus-oldest count by
+         * their actual elapsed time (so jittered ticks don't bias it). Averaging
+         * across the window cuts the encoder quantization noise a single-tick
+         * difference shows at 200 Hz. During warm-up it uses whatever is buffered. */
+        int64_t posL_cnt = encoder_count(0);
+        int64_t posR_cnt = encoder_count(1);
+        vel_hist_t[vel_head]  = now_us;
+        vel_hist[0][vel_head] = posL_cnt;
+        vel_hist[1][vel_head] = posR_cnt;
+        int vel_new = vel_head;
+        if (vel_n < VEL_WIN) vel_n++;
+        vel_head = (vel_head + 1) % VEL_WIN;
+        int vel_old = (vel_new - (vel_n - 1) + VEL_WIN) % VEL_WIN;
+        float velL = 0.0f, velR = 0.0f;
+        int64_t win_us = vel_hist_t[vel_new] - vel_hist_t[vel_old];
+        if (win_us > 0) {
+            float scale = 1e6f / (float)win_us;   /* counts over the window -> counts/sec */
+            velL = encoder_cps_to_radps((int32_t)((vel_hist[0][vel_new] - vel_hist[0][vel_old]) * scale));
+            velR = encoder_cps_to_radps((int32_t)((vel_hist[1][vel_new] - vel_hist[1][vel_old]) * scale));
+        }
+
         /* Motor commands. With the controller enabled they come from the wheel
          * controller. Otherwise it's open loop: a loaded playback script (one
          * (mL,mR) entry per tick) takes priority, else the effort set from the
          * web terminal ('motor'/'stop'). ('stop' only zeroes the open-loop
          * command; STOP_CONTROL deletes this task entirely.) */
         float cmdL, cmdR;
+        float wsetL = NAN, wsetR = NAN;   /* setpoints for telemetry (NaN when open loop) */
         if (s_ctrl_enabled) {
-            /* TODO: wheel/velocity controller -> cmdL, cmdR from setpoints. */
-            cmdL = 0.0f;
-            cmdR = 0.0f;
+            /* Rising edge into closed loop: clear the integrators/filters so the
+             * loop starts from a clean slate rather than a stale wound-up state. */
+            if (!ctrl_was) wheel_pi_reset();
+            /* Per-wheel PI + deadband + anti-windup -> duty. dt is the measured
+             * tick period so gains stay correct under jitter. */
+            float dt = (dt_us > 0) ? (float)dt_us * 1e-6f : (1.0f / (float)CONTROL_HZ);
+            wsetL = wheel_pi_setpoint(0);
+            wsetR = wheel_pi_setpoint(1);
+            cmdL = wheel_pi_step(0, velL, dt);
+            cmdR = wheel_pi_step(1, velR, dt);
         } else if (s_db_active) {
             /* Deadband sweep takes priority over playback/manual while running. */
             deadband_step(now_us, &cmdL, &cmdR);
@@ -289,28 +333,25 @@ static void control_task(void *arg)
         }
         motor_set(0, cmdL);
         motor_set(1, cmdR);
+        ctrl_was = s_ctrl_enabled;
 
-        /* Per-tick wheel angle (rad) and angular speed (rad/s). Speed is a
-         * single-tick finite difference of the counts divided by the ACTUAL
-         * elapsed time (1e6/dt_us counts/sec), so a jittered tick doesn't bias
-         * the estimate; encoder_cps_to_radps turns counts/sec into rad/s. The
-         * first tick and any nonsensical dt fall back to the nominal rate. */
-        float cps_scale = (dt_us > 0) ? (1e6f / (float)dt_us) : (float)CONTROL_HZ;
-        int64_t posL_cnt = encoder_count(0);
-        int64_t posR_cnt = encoder_count(1);
+        /* Record this tick. Wheel angle (rad) is the continuous double-precision
+         * count; the per-tick speeds were computed above (reused here so the
+         * controller and telemetry see the same numbers). wsetL/wsetR are the
+         * closed-loop setpoints, NaN when running open loop. */
         sample_t *smp = &s_buf[active][idx];
         smp->t_us = now_us;
         smp->posL = (float)encoder_angle_rad(0);
         smp->posR = (float)encoder_angle_rad(1);
-        smp->velL = encoder_cps_to_radps((int32_t)((posL_cnt - pos_last[0]) * cps_scale));
-        smp->velR = encoder_cps_to_radps((int32_t)((posR_cnt - pos_last[1]) * cps_scale));
+        smp->velL = velL;
+        smp->velR = velR;
         smp->roll  = roll;
         smp->pitch = pitch;
+        smp->wsetL = wsetL;
+        smp->wsetR = wsetR;
         smp->mL   = cmdL;
         smp->mR   = cmdR;
         smp->imu  = imu;
-        pos_last[0] = posL_cnt;
-        pos_last[1] = posR_cnt;
 
         /* Buffer full: hand it to the reporter and switch to the other half.
          * xQueueSend with timeout 0 never blocks the control loop - if the

@@ -15,6 +15,7 @@
 #include "telemetry.h"
 #include "motors.h"
 #include "encoders.h"
+#include "wheel_pi.h"          /* wheel-speed controller: setpoint + gains */
 #include "control.h"           /* control_mode(): gate OTA on STOP_CONTROL */
 
 static const char *TAG = "web_server";
@@ -73,10 +74,11 @@ static void ws_send_text(httpd_req_t *req, const char *text)
     httpd_ws_send_frame(req, &frame);
 }
 
-/* Reply to a command with a {"type":"resp","text":"..."} frame. */
+/* Reply to a command with a {"type":"resp","text":"..."} frame. Sized to fit the
+ * longest reply (the 'help' listing) without truncation. */
 static void ws_reply(httpd_req_t *req, const char *text)
 {
-    char buf[256];
+    char buf[512];
     snprintf(buf, sizeof(buf), "{\"type\":\"resp\",\"text\":\"%s\"}", text);
     ws_send_text(req, buf);
 }
@@ -96,11 +98,33 @@ static void reply_experiment(httpd_req_t *req)
 static void handle_command(httpd_req_t *req, const char *cmd)
 {
     if (strcmp(cmd, "help") == 0) {
-        ws_reply(req, "commands: help | stats | motor <l|r|both> <-100..100> | stop | "
-                      "control start | control stop | exp motors|motor-ctrl|angles | "
-                      "est on|off | ctrl on|off | play | play stop | deadband | "
-                      "deadband stop | enc reset | stream on | stream off | rollback | "
-                      "(flashing requires STOP_CONTROL)");
+        /* Multi-line guide. Newlines are embedded as the two-char JSON escape
+         * (\\n) so the reply stays valid JSON and the client renders line breaks.
+         * Built in a local buffer because it is longer than ws_reply's. */
+        static const char help[] =
+            "Balance Bot terminal.\\n"
+            "Bring-up: control start -> exp motor-ctrl -> speed <rad/s>, then "
+            "watch the wheels track. Flashing needs control stop first.\\n"
+            "\\n"
+            "help                          - this guide\\n"
+            "stats                         - loop timing + current modes\\n"
+            "motor <l|r|both> <-100..100>  - open-loop duty %, needs TEST_MOTORS\\n"
+            "stop                          - zero motor outputs (task keeps running)\\n"
+            "speed <l|r|both> <rad/s>      - wheel-speed setpoint (controller on)\\n"
+            "gains <l|r|both> <kp> <ki>    - set/report PI gains (gains default resets)\\n"
+            "dbcomp on|off                 - controller deadband compensation\\n"
+            "control start|stop            - start/stop the control task\\n"
+            "exp motors|motor-ctrl|angles  - experiment preset\\n"
+            "est on|off                    - angle estimation\\n"
+            "ctrl on|off                   - wheel-speed controller\\n"
+            "play | play stop              - run/stop uploaded motor script\\n"
+            "deadband | deadband stop      - run/stop deadband sweep\\n"
+            "enc reset                     - zero encoder counts\\n"
+            "stream on|off                 - telemetry streaming\\n"
+            "rollback                      - boot the previous OTA slot";
+        char buf[1200];
+        snprintf(buf, sizeof(buf), "{\"type\":\"resp\",\"text\":\"%s\"}", help);
+        ws_send_text(req, buf);
     } else if (strcmp(cmd, "exp motors") == 0) {
         control_set_experiment(TEST_MOTORS);
         reply_experiment(req);
@@ -183,11 +207,81 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         char msg[64];
         snprintf(msg, sizeof(msg), "motor %s = %d%%", which, pct);
         ws_reply(req, msg);
+    } else if (strncmp(cmd, "speed", 5) == 0) {
+        /* Per-wheel speed setpoint (rad/s): "speed l 10", "speed r -5",
+         * "speed both 8". Only has an effect with the controller enabled
+         * (exp motor-ctrl / ctrl on). */
+        char which[8];
+        float w;
+        if (sscanf(cmd + 5, "%7s %f", which, &w) != 2) {
+            char msg[96];
+            snprintf(msg, sizeof(msg),
+                     "usage: speed <l|r|both> <rad/s> (now L=%.3f R=%.3f)",
+                     (double)wheel_pi_setpoint(0), (double)wheel_pi_setpoint(1));
+            ws_reply(req, msg);
+            return;
+        }
+        if (strcmp(which, "l") == 0 || strcmp(which, "left") == 0) {
+            wheel_pi_set_setpoint(0, w);
+        } else if (strcmp(which, "r") == 0 || strcmp(which, "right") == 0) {
+            wheel_pi_set_setpoint(1, w);
+        } else if (strcmp(which, "both") == 0 || strcmp(which, "b") == 0) {
+            wheel_pi_set_setpoint(0, w);
+            wheel_pi_set_setpoint(1, w);
+        } else {
+            ws_reply(req, "speed: pick l | r | both");
+            return;
+        }
+        char msg[128];
+        snprintf(msg, sizeof(msg), "speed setpoint: L=%.3f R=%.3f rad/s%s",
+                 (double)wheel_pi_setpoint(0), (double)wheel_pi_setpoint(1),
+                 control_controller_enabled() ? "" :
+                     " (controller OFF - send 'ctrl on' or 'exp motor-ctrl')");
+        ws_reply(req, msg);
+    } else if (strncmp(cmd, "gains", 5) == 0) {
+        /* Tune the PI gains live: "gains <l|r|both> <kp> <ki>", or restore the
+         * compiled defaults with "gains default". No args (or an unrecognized
+         * wheel) just reports the current per-wheel gains. */
+        char which[8];
+        float kp, ki;
+        int n = sscanf(cmd + 5, "%7s %f %f", which, &kp, &ki);
+        if (n >= 1 && (strcmp(which, "default") == 0 || strcmp(which, "reset") == 0)) {
+            wheel_pi_reset_gains();
+        } else if (n == 3) {
+            if (strcmp(which, "l") == 0 || strcmp(which, "left") == 0) {
+                wheel_pi_set_gains(0, kp, ki);
+            } else if (strcmp(which, "r") == 0 || strcmp(which, "right") == 0) {
+                wheel_pi_set_gains(1, kp, ki);
+            } else if (strcmp(which, "both") == 0 || strcmp(which, "b") == 0) {
+                wheel_pi_set_gains(0, kp, ki);
+                wheel_pi_set_gains(1, kp, ki);
+            } else {
+                ws_reply(req, "gains: pick l | r | both");
+                return;
+            }
+        }
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "PI gains: L Kp=%.4f Ki=%.4f  R Kp=%.4f Ki=%.4f",
+                 (double)wheel_pi_kp(0), (double)wheel_pi_ki(0),
+                 (double)wheel_pi_kp(1), (double)wheel_pi_ki(1));
+        ws_reply(req, msg);
+    } else if (strcmp(cmd, "dbcomp on") == 0 || strcmp(cmd, "dbcomp off") == 0) {
+        bool on = (cmd[7] == 'o' && cmd[8] == 'n');
+        wheel_pi_set_deadband(on);
+        ws_reply(req, on ? "deadband compensation ON" : "deadband compensation OFF");
+    } else if (strcmp(cmd, "dbcomp") == 0) {
+        ws_reply(req, wheel_pi_deadband() ? "deadband compensation is ON"
+                                          : "deadband compensation is OFF");
     } else if (strcmp(cmd, "stop") == 0) {
         /* Motor-test stop: just zero the outputs. The control task keeps running
-         * (this is NOT STOP_CONTROL); a new motor command re-enables movement. */
+         * (this is NOT STOP_CONTROL); a new motor command re-enables movement.
+         * Also parks the wheel-speed setpoint so a re-enabled controller starts
+         * from rest rather than lunging to a stale target. */
         motor_cmd_set(0, 0.0f);
         motor_cmd_set(1, 0.0f);
+        wheel_pi_set_setpoint(0, 0.0f);
+        wheel_pi_set_setpoint(1, 0.0f);
         ws_reply(req, "motor test stopped (outputs 0); control task still running");
     } else if (strcmp(cmd, "control stop") == 0) {
         control_set_mode(STOP_CONTROL);

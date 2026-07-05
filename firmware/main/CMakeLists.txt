@@ -16,5 +16,6 @@ idf_component_register(
         "wifi_ap.c"
         "web_server.c"
         "control.c"
+        "wheel_pi.c"
     INCLUDE_DIRS "."
 )
