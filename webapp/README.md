@@ -29,6 +29,24 @@ never leaves the PC, so loading the page does not round-trip through the ESP32.
 Only the data connection (`ws://<ip>/ws`) and OTA upload (`http://<ip>/ota`)
 travel over Wi-Fi to the device; everything else is local.
 
+## Panels
+
+The top card (connection, control-task START/STOP, live IMU/motor/encoder
+readouts) is always visible; the terminal + data log sit at the bottom. In
+between are three tabs, each matching an experiment mode:
+
+1. **Manual** (`TEST_MOTORS`) - open-loop duty bar (`l`/`r`/`both` + slider),
+   the deadband sweep (**Find deadband**), and the playback script uploader.
+2. **Motors controller** (`TEST_MOTOR_CONTROLLERS`) - per-wheel speed setpoint
+   bar (`speed <l|r|both> <rad/s>`), live PI-gain editor (`gains ...`), numeric
+   setpoint/measured readouts, and a live plot of measured vs. setpoint wheel
+   speed (last 10 s).
+3. **Flashing** - the OTA `.bin` upload (plus STOP_CONTROL and rollback).
+
+Selecting the **Manual** or **Motors controller** tab also sends the matching
+`exp` command so the panel's controls take effect. You still need the control
+task running (**START**, top bar); flashing needs it stopped (**STOP**).
+
 ## Notes
 
 - Serve the page over **http** (not https). A secure page cannot open a plain

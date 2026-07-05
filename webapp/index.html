@@ -5,122 +5,244 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Balance Bot Terminal</title>
   <style>
-    body { font-family: system-ui, sans-serif; background: #0e1116; color: #e6edf3; margin: 0; padding: 16px; }
-    h1 { font-size: 18px; }
-    .k { color: #8b96a5; }
+    :root {
+      /* dark theme (default fallback) */
+      --bg: #0e1116; --panel: #171c24; --panel2: #0f141b; --line: #222a35;
+      --line2: #2a3340; --fg: #e6edf3; --muted: #8b96a5; --blue: #3b82f6;
+      --blue2: #6ea8fe; --green: #22c55e; --amber: #f59e0b; --red: #ef4444;
+      --ghost: #232c38; --grid: #222a35; --axis: #8b96a5; --zero: #3a4657;
+    }
+    body.light {
+      --bg: #f6f8fa; --panel: #ffffff; --panel2: #f0f3f7; --line: #d0d7de;
+      --line2: #ccd3da; --fg: #1f2328; --muted: #57606a; --blue: #2563eb;
+      --blue2: #1f6feb; --green: #1a7f37; --amber: #9a6700; --red: #cf222e;
+      --ghost: #e7ecf1; --grid: #e2e8f0; --axis: #57606a; --zero: #c4ccd6;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg); margin: 0; padding: 16px; }
+    h1 { font-size: 18px; margin: 0 0 10px; }
+    h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+    .k { color: var(--muted); }
     .v { font-variant-numeric: tabular-nums; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-top: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, max-content)); gap: 6px 22px; }
+    input, select {
+      background: var(--panel2); border: 1px solid var(--line2); color: var(--fg);
+      border-radius: 8px; padding: 8px; font-family: monospace;
+    }
+    input[type=number] { width: 90px; }
+    button { background: var(--blue); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+    button:hover { filter: brightness(1.08); }
+    button.ghost { background: var(--ghost); color: var(--fg); }
+    button.stopbtn { background: var(--red); }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--red); margin-right: 6px; }
+    .dot.on { background: var(--green); }
+    .hint { color: var(--muted); font-size: 12px; }
+    .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line2); color: var(--muted); }
+
+    /* tabs */
+    #tabs { display: flex; gap: 6px; margin-top: 14px; border-bottom: 1px solid var(--line); }
+    .tab {
+      background: transparent; color: var(--muted); border: 1px solid transparent;
+      border-bottom: 0; border-radius: 8px 8px 0 0; padding: 9px 16px; font-size: 13px; cursor: pointer;
+    }
+    .tab.active { background: var(--panel); color: var(--fg); border-color: var(--line); }
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    /* terminal */
     #term {
-      margin-top: 12px; height: 55vh; overflow: auto;
-      background: #171c24; border: 1px solid #222a35; border-radius: 8px;
+      margin-top: 8px; height: 34vh; min-height: 160px; overflow: auto;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
       padding: 8px; font-family: monospace; font-size: 13px; white-space: pre-wrap;
     }
-    .cmd { color: #6ea8fe; }
-    .resp { color: #22c55e; }
-    .sys { color: #8b96a5; }
-    .warn { color: #f59e0b; }
-    #conn { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .cmd { color: var(--blue2); }
+    .resp { color: var(--green); }
+    .sys { color: var(--muted); }
+    .warn { color: var(--amber); }
     #bar { display: flex; gap: 8px; margin-top: 8px; }
-    #in, #ip { background: #0f141b; border: 1px solid #2a3340; color: #e6edf3;
-          border-radius: 8px; padding: 8px; font-family: monospace; }
     #in { flex: 1; }
-    button { background: #3b82f6; color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
-    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #ef4444; margin-right: 6px; }
-    .dot.on { background: #22c55e; }
-    #ota { margin-top: 12px; padding-top: 10px; border-top: 1px solid #222a35; font-size: 13px; }
-    #ota input[type=file] { color: #8b96a5; }
-    #otastat { margin-left: 8px; }
-    #bar2 { height: 6px; background: #171c24; border-radius: 4px; margin-top: 6px; overflow: hidden; display: none; }
-    #bar2 > div { height: 100%; width: 0; background: #3b82f6; transition: width .1s; }
-    #motors { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-    #motors select, #motors input[type=range] { background: #0f141b; border: 1px solid #2a3340; color: #e6edf3; border-radius: 6px; }
-    #mval { flex: 1; min-width: 140px; }
-    .stopbtn { background: #ef4444; }
+
+    /* ota progress */
+    #bar2 { height: 6px; background: var(--panel2); border-radius: 4px; margin-top: 8px; overflow: hidden; display: none; }
+    #bar2 > div { height: 100%; width: 0; background: var(--blue); transition: width .1s; }
+
+    /* plot */
+    #plotwrap { margin-top: 10px; }
+    .plottitle { font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+    .plot { width: 100%; height: 380px; display: block; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
+    .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; }
+    .legend span, .legend label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+    .legend label { cursor: pointer; user-select: none; }
+    .legend input[type=checkbox] { margin: 0; cursor: pointer; }
+    .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
   </style>
 </head>
 <body>
-  <h1><span id="dot" class="dot"></span>Balance Bot - terminal</h1>
+  <h1><span id="dot" class="dot"></span>Balance Bot</h1>
 
-  <div id="conn">
-    <span class="k">ESP32 IP:</span>
-    <input id="ip" size="16" placeholder="192.168.4.1" />
-    <button id="connbtn" onclick="reconnect()">Connect</button>
-  </div>
-
-  <div style="margin-top:6px">
-    <span class="k">accel (g):</span> <span class="v" id="acc">--</span> &nbsp;
-    <span class="k">gyro (dps):</span> <span class="v" id="gyr">--</span> &nbsp;
-    <span class="k">temp:</span> <span class="v" id="temp">--</span> &deg;C
-  </div>
-  <div style="margin-top:6px">
-    <span class="k">motor L:</span> <span class="v" id="mL">--</span> &nbsp;
-    <span class="k">motor R:</span> <span class="v" id="mR">--</span>
-  </div>
-  <div style="margin-top:6px">
-    <span class="k">vel (rad/s):</span> <span class="v" id="vel">--</span> &nbsp;
-    <button onclick="send('enc reset')">reset enc</button>
-  </div>
-
-  <div id="motors">
-    <span class="k">motor test:</span>
-    <select id="msel">
-      <option value="both">both</option>
-      <option value="l">left</option>
-      <option value="r">right</option>
-    </select>
-    <input type="range" id="mval" min="-100" max="100" value="0" />
-    <span id="mvallbl" class="v">0%</span>
-    <button onclick="applyMotor()">Apply</button>
-    <button class="stopbtn" onclick="send('stop')">STOP</button>
-    <button onclick="send('deadband')">Find deadband</button>
-    <button class="stopbtn" onclick="send('deadband stop')">Stop DB</button>
-  </div>
-
-  <div id="ctrl" style="margin-top:8px;">
-    <span class="k">control task:</span>
-    <button onclick="send('control start')">START_CONTROL</button>
-    <button class="stopbtn" onclick="send('control stop')">STOP_CONTROL</button>
-    <span class="v">(stop before flashing)</span>
+  <!-- connection + live status (always visible) -->
+  <div class="card">
+    <div class="row">
+      <span class="k">ESP32 IP:</span>
+      <input id="ip" size="14" placeholder="192.168.4.1" />
+      <button id="connbtn" onclick="reconnect()">Connect</button>
+      <button id="themebtn" class="ghost" onclick="toggleTheme()">Dark</button>
+      <span style="flex:1"></span>
+      <span class="k">control task:</span>
+      <button class="ghost" onclick="send('control start')">START</button>
+      <button class="stopbtn" onclick="send('control stop')">STOP</button>
+      <button class="ghost" onclick="send('stats')">stats</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="k">accel (g):</span> <span class="v" id="acc">--</span>
+      <span class="k">gyro (dps):</span> <span class="v" id="gyr">--</span>
+      <span class="k">temp:</span> <span class="v" id="temp">--</span>&deg;C
+      <span style="width:14px"></span>
+      <span class="k">motor L/R:</span> <span class="v" id="mL">--</span>/<span class="v" id="mR">--</span>
+      <span class="k">vel (rad/s):</span> <span class="v" id="vel">--</span>
+      <button class="ghost" onclick="send('enc reset')">reset enc</button>
+    </div>
+    <div class="row" id="rec" style="margin-top:10px">
+      <span class="k">data log:</span>
+      <select id="rectopic">
+        <option value="imu">imu</option>
+        <option value="angles">angles</option>
+        <option value="motors">motors</option>
+      </select>
+      <button id="recbtn" onclick="toggleRecord()">Record to file</button>
+      <span id="recstat" class="sys">idle</span>
+    </div>
   </div>
 
-  <div id="exp" style="margin-top:8px;">
-    <span class="k">experiment:</span>
-    <button onclick="send('exp motors')">TEST_MOTORS</button>
-    <button onclick="send('exp motor-ctrl')">TEST_MOTOR_CONTROLLERS</button>
-    <button onclick="send('exp angles')">TEST_ANGLES_ESTIMATION</button>
+  <!-- tab bar -->
+  <div id="tabs">
+    <button class="tab" data-tab="manual" onclick="showTab('manual')">Manual</button>
+    <button class="tab" data-tab="ctrl" onclick="showTab('ctrl')">Motors controller</button>
+    <button class="tab" data-tab="flash" onclick="showTab('flash')">Flashing</button>
   </div>
 
-  <div id="seq" style="margin-top:8px;">
-    <span class="k">motor script:</span>
-    <input type="file" id="seqfile" accept=".csv,.txt" />
-    <button onclick="uploadSeq()">Load &amp; play</button>
-    <button class="stopbtn" onclick="send('play stop')">Stop</button>
-    <span id="seqstat" class="sys"></span>
-    <span class="v">(TEST_MOTORS; steps "dur,mL,mR" - dur sec, mL/mR -1..1, max 20)</span>
+  <!-- 1. Manual panel (TEST_MOTORS) -->
+  <div class="panel card" id="panel-manual">
+    <h2>Manual &mdash; open-loop test <span class="pill">TEST_MOTORS</span></h2>
+
+    <div class="row">
+      <span class="k">duty:</span>
+      <select id="msel">
+        <option value="both">both</option>
+        <option value="l">left</option>
+        <option value="r">right</option>
+      </select>
+      <input type="range" id="mval" min="-100" max="100" value="0" style="flex:1; min-width:160px" />
+      <span id="mvallbl" class="v" style="width:48px; text-align:right">0%</span>
+      <button onclick="applyMotor()">Apply</button>
+      <button class="stopbtn" onclick="send('stop')">STOP</button>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <span class="k">deadband:</span>
+      <button onclick="send('deadband')">Find deadband</button>
+      <button class="stopbtn" onclick="send('deadband stop')">Stop sweep</button>
+      <span class="hint">ramps each wheel 0&rarr;15% to find where it starts turning; result in the log.</span>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <span class="k">script:</span>
+      <input type="file" id="seqfile" accept=".csv,.txt" />
+      <button onclick="uploadSeq()">Load &amp; play</button>
+      <button class="stopbtn" onclick="send('play stop')">Stop</button>
+      <span id="seqstat" class="sys"></span>
+    </div>
+    <div class="hint" style="margin-top:6px">steps <code>dur,mL,mR</code> &mdash; dur in seconds, mL/mR in -1..1, max 20 steps.</div>
   </div>
 
-  <div id="rec" style="margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-    <span class="k">data log:</span>
-    <select id="rectopic">
-      <option value="imu">imu</option>
-      <option value="angles">angles</option>
-      <option value="motors">motors</option>
-    </select>
-    <button id="recbtn" onclick="toggleRecord()">Record to file</button>
-    <span id="recstat" class="sys">idle</span>
+  <!-- 2. Motors controller panel (TEST_MOTOR_CONTROLLERS) -->
+  <div class="panel card" id="panel-ctrl">
+    <h2>Motors controller &mdash; closed-loop wheel speed <span class="pill">TEST_MOTOR_CONTROLLERS</span></h2>
+
+    <div class="row">
+      <span class="k">speed:</span>
+      <select id="ssel">
+        <option value="both">both</option>
+        <option value="l">left</option>
+        <option value="r">right</option>
+      </select>
+      <input type="number" id="sval" value="10" step="0.5" />
+      <span class="k">rad/s</span>
+      <button onclick="applySpeed()">Apply</button>
+      <button class="stopbtn" onclick="stopSpeed()">Zero</button>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <span class="k">gains:</span>
+      <select id="gsel">
+        <option value="both">both</option>
+        <option value="l">left</option>
+        <option value="r">right</option>
+      </select>
+      <span class="k">Kp</span><input type="number" id="gkp" value="0.1437" step="0.001" />
+      <span class="k">Ki</span><input type="number" id="gki" value="0.7184" step="0.001" />
+      <button onclick="applyGains()">Set</button>
+      <button class="ghost" onclick="send('gains default')">Default</button>
+      <button class="ghost" onclick="send('gains')">Report</button>
+      <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px; cursor:pointer">
+        <input type="checkbox" id="dbcomp" checked onchange="send('dbcomp ' + (this.checked ? 'on' : 'off'))">
+        deadband comp
+      </label>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <span class="k">setpoint L/R:</span> <span class="v" id="spLR">--</span>
+      <span class="k">measured L/R:</span> <span class="v" id="meLR">--</span> <span class="k">rad/s</span>
+    </div>
+
+    <div id="plotwrap">
+      <div class="plottitle">wheel speed (rad/s) &mdash; last 10 s</div>
+      <canvas id="plot" class="plot"></canvas>
+      <div class="legend">
+        <label><input type="checkbox" checked onchange="toggleSeries('plot','vL',this.checked)"><i class="swatch" style="background:#6ea8fe"></i>vel L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot','vR',this.checked)"><i class="swatch" style="background:#f472b6"></i>vel R</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot','spL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #6ea8fe"></i>setpoint L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot','spR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #f472b6"></i>setpoint R</label>
+      </div>
+
+      <div class="plottitle">motor output (duty)</div>
+      <canvas id="plot2" class="plot"></canvas>
+      <div class="legend">
+        <label><input type="checkbox" checked onchange="toggleSeries('plot2','mL',this.checked)"><i class="swatch" style="background:#34d399"></i>motor L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot2','mR',this.checked)"><i class="swatch" style="background:#fbbf24"></i>motor R</label>
+        <span style="flex:1"></span>
+        <button class="ghost" id="pausebtn" onclick="togglePause()">Pause</button>
+        <button class="ghost" onclick="resetView()">Reset view</button>
+        <button class="ghost" onclick="clearPlot()">Clear plots</button>
+      </div>
+      <div class="hint" style="margin-top:4px">scroll to zoom time &middot; shift+scroll to zoom magnitude &middot; drag to pan (when paused)</div>
+    </div>
   </div>
 
-  <div id="term"></div>
-  <div id="bar">
-    <input id="in" placeholder="type a command (try: help) and press Enter" autocomplete="off" />
-    <button onclick="sendCmd()">Send</button>
-  </div>
-
-  <div id="ota">
-    <span class="k">firmware (OTA):</span>
-    <input type="file" id="fw" accept=".bin" />
-    <button onclick="upload()">Flash</button>
-    <span id="otastat" class="sys"></span>
+  <!-- 3. Flashing panel -->
+  <div class="panel card" id="panel-flash">
+    <h2>Flashing &mdash; wireless firmware upload</h2>
+    <div class="hint" style="margin-bottom:10px">Flashing is only allowed in <code>STOP_CONTROL</code>. Click STOP (top bar) first.</div>
+    <div class="row">
+      <span class="k">firmware (.bin):</span>
+      <input type="file" id="fw" accept=".bin" />
+      <button onclick="upload()">Flash</button>
+      <button class="stopbtn" onclick="send('control stop')">STOP_CONTROL</button>
+      <button class="ghost" onclick="send('rollback')">Rollback</button>
+      <span id="otastat" class="sys"></span>
+    </div>
     <div id="bar2"><div id="bar2fill"></div></div>
+  </div>
+
+  <!-- terminal (always visible) -->
+  <div class="card">
+    <div id="term"></div>
+    <div id="bar">
+      <input id="in" placeholder="type a command (try: help) and press Enter" autocomplete="off" />
+      <button onclick="sendCmd()">Send</button>
+    </div>
   </div>
 
   <script>
@@ -149,8 +271,8 @@
       while (term.childElementCount > 500) term.removeChild(term.firstChild);
     }
 
-    const f2 = (x) => (x >= 0 ? '+' : '') + x.toFixed(2);
-    const f1 = (x) => (x >= 0 ? '+' : '') + x.toFixed(1);
+    const f2 = (x) => (Number.isNaN(x) ? '--' : (x >= 0 ? '+' : '') + x.toFixed(2));
+    const f1 = (x) => (Number.isNaN(x) ? '--' : (x >= 0 ? '+' : '') + x.toFixed(1));
 
     /* Each field updates independently so a per-topic frame (which carries only
      * some of them) refreshes just its own part of the dashboard. */
@@ -170,6 +292,11 @@
       }
       if (d.velL !== undefined) {
         vel.textContent = `${f2(d.velL)} ${f2(d.velR)}`;
+        document.getElementById('meLR').textContent = `${f2(d.velL)} / ${f2(d.velR)}`;
+      }
+      if (d.velL_sp !== undefined) {
+        const s = (v) => (v === null || v === undefined || Number.isNaN(v)) ? 'off' : f2(v);
+        document.getElementById('spLR').textContent = `${s(d.velL_sp)} / ${s(d.velR_sp)}`;
       }
     }
 
@@ -254,8 +381,8 @@
     }
 
     /* A telemetry batch carries a topic + rows[] in that topic's column order.
-     * Refresh the matching part of the dashboard from the last row, and (if we
-     * are recording this topic) append its rows to the CSV. */
+     * Refresh the matching part of the dashboard from the last row, feed the plot
+     * (all rows), and (if we are recording this topic) append its rows to the CSV. */
     function onBinary(buf) {
       const b = decodeBatch(buf);
       if (!b || !b.rows.length) return;
@@ -265,11 +392,259 @@
         setValues({ imu_ok: !!last.ok, ax: last.ax, ay: last.ay, az: last.az,
                     gx: last.gx, gy: last.gy, gz: last.gz, temp: last.temp });
       } else if (topic === 'motors') {
-        setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR });
+        setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR,
+                    velL_sp: last.velL_sp, velR_sp: last.velR_sp });
+        /* While paused, ignore incoming samples entirely - the frozen view is
+         * kept as-is; Reset view (or Resume) drops back to the live series. */
+        if (!paused) {
+          for (const r of rows) {
+            const o = rowToObj(cols, r);
+            pushPlot(o.t / 1e6, o.velL, o.velR, o.velL_sp, o.velR_sp, o.mL, o.mR);
+          }
+          scheduleDraw();
+        }
       }
       /* 'angles' has no live readout yet (values are NaN until estimation). */
       if (recording && topic === recTopic) writeBatch(topic, cols, rows);
     }
+
+    /* ---- live plots (canvas, no libraries) ---- */
+    const RETAIN_S = 60;                       /* seconds of history kept in memory */
+    let plotData = [];                         /* {t, vL, vR, spL, spR, mL, mR} */
+    let drawPending = false;
+
+    /* View state shared by both charts (they share the time axis). winS is the
+     * visible time window; when paused, pausedRightT freezes the right edge so
+     * incoming data no longer scrolls the view. */
+    const view = { winS: 10 };
+    let paused = false;
+    let pausedRightT = 0;
+
+    const PAD = { l: 44, r: 10, t: 10, b: 22 };
+
+    /* Each chart: its series and an optional fixed base y-range. yview, when set
+     * (by shift+scroll or drag), overrides auto-scaling until Reset view. */
+    const CHARTS = {
+      plot:  { id: 'plot',  base: null,     yview: null, series: [
+        { key: 'vL',  color: '#6ea8fe', dash: [] },
+        { key: 'vR',  color: '#f472b6', dash: [] },
+        { key: 'spL', color: '#6ea8fe', dash: [5, 4] },
+        { key: 'spR', color: '#f472b6', dash: [5, 4] },
+      ] },
+      plot2: { id: 'plot2', base: [-1, 1], yview: null, series: [
+        { key: 'mL', color: '#34d399', dash: [] },
+        { key: 'mR', color: '#fbbf24', dash: [] },
+      ] },
+    };
+
+    function pushPlot(t, vL, vR, spL, spR, mL, mR) {
+      plotData.push({ t, vL, vR, spL, spR, mL, mR });
+      const tmin = t - RETAIN_S;
+      while (plotData.length && plotData[0].t < tmin) plotData.shift();
+    }
+    function clearPlot() { plotData = []; scheduleDraw(); }
+
+    /* Show/hide one series from its legend checkbox. */
+    function toggleSeries(chartId, key, on) {
+      const chart = CHARTS[chartId];
+      if (!chart) return;
+      const s = chart.series.find((x) => x.key === key);
+      if (s) { s.visible = on; scheduleDraw(); }
+    }
+
+    function latestT() { return plotData.length ? plotData[plotData.length - 1].t : 0; }
+    function rightEdgeT() { return paused ? pausedRightT : latestT(); }
+    function geom(cv) {
+      const W = cv.clientWidth, H = cv.clientHeight;
+      return { W, H, x0: PAD.l, x1: W - PAD.r, y0: PAD.t, y1: H - PAD.b };
+    }
+
+    /* Current y-range for a chart: manual (yview) > fixed base > auto-scale over
+     * the data currently inside the visible time window. */
+    function getRange(chart) {
+      if (chart.yview) return chart.yview;
+      if (chart.base) return chart.base.slice();
+      const tR = rightEdgeT(), tL = tR - view.winS;
+      let lo = Infinity, hi = -Infinity;
+      for (const p of plotData) {
+        if (p.t < tL || p.t > tR) continue;
+        for (const s of chart.series) {
+          if (s.visible === false) continue;
+          const v = p[s.key];
+          if (v != null && !Number.isNaN(v)) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        }
+      }
+      if (!isFinite(lo)) { lo = -1; hi = 1; }
+      if (hi - lo < 1) { const m = (hi + lo) / 2; lo = m - 1; hi = m + 1; }
+      const pad = (hi - lo) * 0.1; return [lo - pad, hi + pad];
+    }
+
+    function togglePause() {
+      paused = !paused;
+      if (paused) pausedRightT = latestT();
+      else plotData = [];   /* dropped samples while paused - restart from live */
+      document.getElementById('pausebtn').textContent = paused ? 'Resume' : 'Pause';
+      updateCursor();
+      scheduleDraw();
+    }
+    function resetView() {
+      view.winS = 10; paused = false;
+      plotData = [];        /* back to the live series */
+      CHARTS.plot.yview = null; CHARTS.plot2.yview = null;
+      /* restore every series to visible + re-check its legend box */
+      for (const c of [CHARTS.plot, CHARTS.plot2]) for (const s of c.series) s.visible = true;
+      document.querySelectorAll('.legend input[type=checkbox]').forEach((cb) => { cb.checked = true; });
+      document.getElementById('pausebtn').textContent = 'Pause';
+      updateCursor();
+      scheduleDraw();
+    }
+    function updateCursor() {
+      for (const id of ['plot', 'plot2']) {
+        const cv = document.getElementById(id);
+        if (cv) cv.style.cursor = paused ? 'grab' : 'default';
+      }
+    }
+
+    function scheduleDraw() {
+      if (drawPending) return;
+      drawPending = true;
+      requestAnimationFrame(() => {
+        drawPending = false;
+        draw(CHARTS.plot);
+        draw(CHARTS.plot2);
+      });
+    }
+
+    function draw(chart) {
+      const cv = document.getElementById(chart.id);
+      if (!cv) return;
+      const { W, H, x0, x1, y0, y1 } = geom(cv);
+      if (!W || !H) return;   /* panel hidden */
+      const dpr = window.devicePixelRatio || 1;
+      if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+      const g = cv.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
+
+      const [lo, hi] = getRange(chart);
+      const tR = rightEdgeT(), tL = tR - view.winS;
+      const sx = (t) => x0 + (x1 - x0) * (t - tL) / (tR - tL);
+      const sy = (v) => y1 - (y1 - y0) * (v - lo) / (hi - lo);
+
+      /* grid + axis labels (colors follow the theme via CSS variables) */
+      const cs = getComputedStyle(document.body);
+      const cGrid = cs.getPropertyValue('--grid').trim() || '#222a35';
+      const cAxis = cs.getPropertyValue('--axis').trim() || '#8b96a5';
+      const cZero = cs.getPropertyValue('--zero').trim() || '#3a4657';
+      g.strokeStyle = cGrid; g.fillStyle = cAxis;
+      g.lineWidth = 1; g.font = '11px monospace'; g.textBaseline = 'middle';
+      const ticks = 4;
+      for (let i = 0; i <= ticks; i++) {
+        const v = lo + (hi - lo) * i / ticks;
+        const y = sy(v);
+        g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+        g.textAlign = 'right'; g.fillText(v.toFixed(1), x0 - 6, y);
+      }
+      if (lo < 0 && hi > 0) {
+        g.strokeStyle = cZero; g.beginPath(); g.moveTo(x0, sy(0)); g.lineTo(x1, sy(0)); g.stroke();
+      }
+      /* x-axis time scale: vertical grid + labels in seconds relative to the
+       * newest sample (0 = now, negative = older). Tick step adapts to the zoom
+       * so there are ~5 ticks across whatever window is showing. */
+      const t0 = latestT();
+      const STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60];
+      let step = STEPS[STEPS.length - 1];
+      for (const s of STEPS) { if (s >= view.winS / 5) { step = s; break; } }
+      const dec = step < 1 ? 1 : 0;
+      g.textAlign = 'center'; g.textBaseline = 'top';
+      const rL = tL - t0, rR = tR - t0;
+      for (let r = Math.ceil(rL / step) * step; r <= rR + 1e-9; r += step) {
+        const X = sx(t0 + r);
+        g.strokeStyle = cGrid; g.beginPath(); g.moveTo(X, y0); g.lineTo(X, y1); g.stroke();
+        const rr = Math.abs(r) < 1e-9 ? 0 : r;
+        g.fillStyle = cAxis; g.fillText(`${rr.toFixed(dec)}s`, X, y1 + 4);
+      }
+      if (paused) { g.textAlign = 'right'; g.fillStyle = cAxis; g.fillText('paused', x1, y0); }
+
+      if (plotData.length >= 2) {
+        g.save();
+        g.beginPath(); g.rect(x0, y0, x1 - x0, y1 - y0); g.clip();
+        for (const s of chart.series) {
+          if (s.visible === false) continue;
+          g.strokeStyle = s.color; g.lineWidth = s.dash.length ? 1.2 : 1.6;
+          g.setLineDash(s.dash); g.globalAlpha = s.dash.length ? 0.8 : 1;
+          g.beginPath();
+          let started = false;
+          for (const p of plotData) {
+            if (p.t < tL - 1 || p.t > tR + 1) continue;   /* small margin off-screen */
+            const v = p[s.key];
+            if (v == null || Number.isNaN(v)) { started = false; continue; }
+            const X = sx(p.t), Y = sy(v);
+            if (!started) { g.moveTo(X, Y); started = true; } else { g.lineTo(X, Y); }
+          }
+          g.stroke();
+        }
+        g.restore();
+        g.setLineDash([]); g.globalAlpha = 1;
+      }
+    }
+
+    /* ---- mouse zoom / pan ---- */
+    function onWheel(e) {
+      const chart = CHARTS[e.currentTarget.id];
+      if (!chart) return;
+      e.preventDefault();
+      const cv = e.currentTarget;
+      const { x0, x1, y0, y1 } = geom(cv);
+      const rect = cv.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const f = e.deltaY < 0 ? 0.85 : 1 / 0.85;   /* scroll up = zoom in */
+
+      if (e.shiftKey) {                            /* zoom magnitude (this chart) */
+        const [lo, hi] = getRange(chart);
+        const frac = (y1 - my) / (y1 - y0);        /* 0 at bottom .. 1 at top */
+        const vCur = lo + frac * (hi - lo);
+        const span = (hi - lo) * f;
+        chart.yview = [vCur - frac * span, vCur - frac * span + span];
+      } else {                                     /* zoom time (both charts) */
+        const tR = rightEdgeT();
+        const frac = (x1 - mx) / (x1 - x0);        /* distance from right edge */
+        const tCur = tR - frac * view.winS;
+        view.winS = Math.min(RETAIN_S, Math.max(0.2, view.winS * f));
+        if (paused) pausedRightT = tCur + frac * view.winS;   /* keep cursor time fixed */
+      }
+      scheduleDraw();
+    }
+
+    let drag = null;
+    function onDown(e) {
+      if (!paused) return;                         /* live view follows now; pan only when paused */
+      const chart = CHARTS[e.currentTarget.id];
+      const cv = e.currentTarget;
+      const { x0, x1, y0, y1 } = geom(cv);
+      const [lo, hi] = getRange(chart);
+      drag = { chart, cv, x0, x1, y0, y1, lo, hi, sx: e.clientX, sy: e.clientY, rightT: pausedRightT };
+      cv.style.cursor = 'grabbing';
+      e.preventDefault();
+    }
+    function onMove(e) {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+      pausedRightT = drag.rightT - dx * view.winS / (drag.x1 - drag.x0);
+      const vPerPx = (drag.hi - drag.lo) / (drag.y1 - drag.y0);
+      drag.chart.yview = [drag.lo + dy * vPerPx, drag.hi + dy * vPerPx];
+      scheduleDraw();
+    }
+    function onUp() { if (drag) { drag.cv.style.cursor = 'grab'; drag = null; } }
+
+    ['plot', 'plot2'].forEach((id) => {
+      const cv = document.getElementById(id);
+      cv.addEventListener('wheel', onWheel, { passive: false });
+      cv.addEventListener('mousedown', onDown);
+    });
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('resize', scheduleDraw);
 
     /* ---- recording the telemetry stream to a CSV file ----
      * Prefer the File System Access API (streams straight to disk); fall back to
@@ -351,7 +726,7 @@
     }
 
     function send(cmd) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) { add('not connected - click Connect', 'sys'); return; }
       add('> ' + cmd, 'cmd');
       ws.send(cmd);
     }
@@ -363,9 +738,30 @@
       input.value = '';
     }
 
+    /* ---- panel controls ---- */
     const mval = document.getElementById('mval');
     mval.addEventListener('input', () => { document.getElementById('mvallbl').textContent = mval.value + '%'; });
     function applyMotor() { send(`motor ${document.getElementById('msel').value} ${mval.value}`); }
+
+    function applySpeed() { send(`speed ${document.getElementById('ssel').value} ${document.getElementById('sval').value}`); }
+    function stopSpeed()  { send('speed both 0'); }
+    function applyGains() {
+      send(`gains ${document.getElementById('gsel').value} ` +
+           `${document.getElementById('gkp').value} ${document.getElementById('gki').value}`);
+    }
+
+    /* ---- tabs. Selecting Manual / Controller also puts the firmware in the
+     * matching experiment mode so the panel's commands actually take effect. ---- */
+    const EXP_FOR_TAB = { manual: 'exp motors', ctrl: 'exp motor-ctrl' };
+    function showTab(name) {
+      document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+      document.getElementById('panel-manual').classList.toggle('active', name === 'manual');
+      document.getElementById('panel-ctrl').classList.toggle('active', name === 'ctrl');
+      document.getElementById('panel-flash').classList.toggle('active', name === 'flash');
+      localStorage.setItem('activeTab', name);
+      if (EXP_FOR_TAB[name] && ws && ws.readyState === WebSocket.OPEN) send(EXP_FOR_TAB[name]);
+      if (name === 'ctrl') scheduleDraw();
+    }
 
     function upload() {
       const f = document.getElementById('fw').files[0];
@@ -420,10 +816,32 @@
       });
     }
 
+    /* ---- theme (light default, remembered between sessions) ---- */
+    function applyTheme(t) {
+      document.body.classList.toggle('light', t === 'light');
+      localStorage.setItem('theme', t);
+      const btn = document.getElementById('themebtn');
+      if (btn) btn.textContent = (t === 'light') ? 'Dark' : 'Light';
+      scheduleDraw();
+    }
+    function toggleTheme() { applyTheme(document.body.classList.contains('light') ? 'dark' : 'light'); }
+    applyTheme(localStorage.getItem('theme') || 'light');
+
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendCmd(); });
     const ipBox = document.getElementById('ip');
     ipBox.value = esp;
     ipBox.addEventListener('keydown', (e) => { if (e.key === 'Enter') reconnect(); });
+
+    /* Restore the last-used tab (without auto-sending an exp command on load:
+     * do the visual switch only, then connect). */
+    (function initTab() {
+      const name = localStorage.getItem('activeTab') || 'manual';
+      document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+      document.getElementById('panel-manual').classList.toggle('active', name === 'manual');
+      document.getElementById('panel-ctrl').classList.toggle('active', name === 'ctrl');
+      document.getElementById('panel-flash').classList.toggle('active', name === 'flash');
+    })();
+
     connect();
   </script>
 </body>
