@@ -6,13 +6,17 @@ function R = motor_id(csvfile)
 %
 % octave --eval "motor_id('../../experiments/motors_identify/motors.csv')"
 %
-% Expects a CSV recorded by the web app's "motors" topic:
+% Expects a CSV recorded by the web app's "motors" topic. Columns are matched
+% by their header names, so extra/reordered columns are tolerated. The current
+% layout is:
 %
-%     t, velL, velR, velL_sp, velR_sp, mL, mR
+%     t, velL, velR, velL_sp, velR_sp, mL, mR, uL, uR
 %
 % where t is seconds (from boot), velL/velR are measured wheel speeds [rad/s],
-% and mL/mR are the commanded PWM duties in -1..+1 (the playback script). The
-% setpoint columns are empty and ignored.
+% and mL/mR are the applied PWM duties in -1..+1 (the playback script here).
+% velL_sp/velR_sp are the closed-loop setpoints and uL/uR the raw PI command
+% before deadband/saturation; both are empty during open-loop identification
+% and are ignored.
 %
 % MODEL (per wheel). Treating each free-spinning wheel as first order from duty
 % u to angular speed w:
@@ -41,12 +45,13 @@ function R = motor_id(csvfile)
                        'motors.csv');
   end
   % Reuse the sim's physical constants (wheel inertia) for the torque mapping.
-  addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'simulation'));
+  addpath(fullfile(fileparts(mfilename('fullpath')), '..', '..', 'simulation'));
 
-  D = dlmread(csvfile, ',', 1, 0);         % skip the header row
-  t  = D(:,1) - D(1,1);                    % seconds from the start of the file
-  w  = struct('L', D(:,2), 'R', D(:,3));
-  u  = struct('L', D(:,6), 'R', D(:,7));
+  [D, names] = read_named_csv(csvfile);    % header-mapped columns
+  col = @(nm) D(:, colidx(names, nm));
+  t  = col('t') - D(1, colidx(names, 't'));% seconds from the start of the file
+  w  = struct('L', col('velL'), 'R', col('velR'));
+  u  = struct('L', col('mL'),   'R', col('mR'));
   dt = median(diff(t));
   printf('\nloaded %d samples, %.2f s, dt = %.4f s (%.0f Hz)\n', ...
          numel(t), t(end), dt, 1/dt);
@@ -70,6 +75,25 @@ function R = motor_id(csvfile)
   [csvdir, csvbase] = fileparts(csvfile);
   outpng = fullfile(csvdir, [csvbase '.png']);   % same name as the CSV, .png
   plot_fits(t, w, u, R, outpng);
+end
+
+% ---------------------------------------------------------------------------
+% Read a CSV with a header row, returning the numeric matrix D and the cell
+% array of column names. Empty fields (e.g. setpoint/raw columns during open-
+% loop runs) are read as 0, matching dlmread's behaviour.
+function [D, names] = read_named_csv(csvfile)
+  fid = fopen(csvfile, 'r');
+  if fid < 0, error('motor_id: cannot open %s', csvfile); end
+  hdr = fgetl(fid);
+  fclose(fid);
+  names = strtrim(strsplit(hdr, ','));
+  D = dlmread(csvfile, ',', 1, 0);         % skip the header row
+end
+
+% Index of a named column (case-sensitive); errors if the column is missing.
+function i = colidx(names, nm)
+  i = find(strcmp(names, nm), 1);
+  if isempty(i), error('motor_id: column "%s" not found in CSV header', nm); end
 end
 
 % ---------------------------------------------------------------------------
@@ -171,7 +195,7 @@ function plot_fits(t, w, u, R, outpng)
       plot(t, wh, 'r', 'LineWidth', 1.2, 'DisplayName', 'model');
       plot(t, u.(s)*max(abs(w.(s))), 'b--', 'DisplayName', 'duty (scaled)');
       xlabel('t [s]'); ylabel('\omega [rad/s]');
-      title(sprintf('%s wheel:  K=%.1f rad/s/duty,  \\tau=%.3f s,  R^2=%.3f', ...
+      title(sprintf('%s wheel:  K=%.2f rad/s/duty,  \\tau=%.3f s,  R^2=%.3f', ...
                     names{i}, f.K_dyn, f.tau, f.R2));
       legend('Location', 'northeast');
     end

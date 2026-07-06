@@ -4,7 +4,8 @@
  *
  * One instance per wheel (index 0 = L, 1 = R) regulates that wheel's angular
  * speed to a common setpoint, so the two non-identical motors behave the same to
- * whatever sits above them. Each step runs PI on the speed error, then deadband
+ * whatever sits above them. Each step adds a model-based feedforward
+ * (u_ff = w_set / K) to PI on the speed error, then applies deadband
  * compensation and output saturation, with conditional-integration anti-windup.
  *
  * Design + math: docs/theory/wheel-speed-controller.md and docs/theory/pi-tuning.md.
@@ -29,13 +30,22 @@ void  wheel_pi_set_gains(int i, float kp, float ki);
 float wheel_pi_kp(int i);
 float wheel_pi_ki(int i);
 
-/* Restore both wheels' gains to the compiled-in defaults. */
+/* Per-wheel feedforward gain K [rad/s per duty] (i = 0 L, 1 R). The feedforward
+ * term is u_ff = w_set / K. */
+void  wheel_pi_set_kff(int i, float k);
+float wheel_pi_kff(int i);
+
+/* Restore both wheels' gains (Kp, Ki, K) to the compiled-in defaults. */
 void wheel_pi_reset_gains(void);
 
 /* Enable/disable deadband compensation (neutral zone + magnitude floor). When
- * off, the raw PI output is used directly (still saturated). On by default. */
+ * off, the raw PI output is used directly (still saturated). Off by default. */
 void wheel_pi_set_deadband(bool on);
 bool wheel_pi_deadband(void);
+
+/* Enable/disable the model-based feedforward (u_ff = w_set / K). On by default. */
+void wheel_pi_set_ff(bool on);
+bool wheel_pi_ff(void);
 
 /* One control step for wheel @p i (0 = L, 1 = R): given the measured wheel speed
  * @p w_meas (rad/s) and the tick period @p dt (s), return the duty in [-1, +1]

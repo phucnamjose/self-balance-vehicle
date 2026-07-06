@@ -113,6 +113,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
             "speed <l|r|both> <rad/s>      - wheel-speed setpoint (controller on)\\n"
             "gains <l|r|both> <kp> <ki>    - set/report PI gains (gains default resets)\\n"
             "dbcomp on|off                 - controller deadband compensation\\n"
+            "ff on|off                     - controller feedforward (u=w_set/K)\\n"
             "control start|stop            - start/stop the control task\\n"
             "exp motors|motor-ctrl|angles  - experiment preset\\n"
             "est on|off                    - angle estimation\\n"
@@ -122,7 +123,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
             "enc reset                     - zero encoder counts\\n"
             "stream on|off                 - telemetry streaming\\n"
             "rollback                      - boot the previous OTA slot";
-        char buf[1200];
+        char buf[1400];
         snprintf(buf, sizeof(buf), "{\"type\":\"resp\",\"text\":\"%s\"}", help);
         ws_send_text(req, buf);
     } else if (strcmp(cmd, "exp motors") == 0) {
@@ -273,6 +274,12 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "dbcomp") == 0) {
         ws_reply(req, wheel_pi_deadband() ? "deadband compensation is ON"
                                           : "deadband compensation is OFF");
+    } else if (strcmp(cmd, "ff on") == 0 || strcmp(cmd, "ff off") == 0) {
+        bool on = (cmd[3] == 'o' && cmd[4] == 'n');
+        wheel_pi_set_ff(on);
+        ws_reply(req, on ? "feedforward ON" : "feedforward OFF");
+    } else if (strcmp(cmd, "ff") == 0) {
+        ws_reply(req, wheel_pi_ff() ? "feedforward is ON" : "feedforward is OFF");
     } else if (strcmp(cmd, "stop") == 0) {
         /* Motor-test stop: just zero the outputs. The control task keeps running
          * (this is NOT STOP_CONTROL); a new motor command re-enables movement.

@@ -6,12 +6,19 @@
 /* Per-wheel PI gains, tuned on hardware (pole-zero cancellation from each
  * motor's identified K, tau; see docs/theory/pi-tuning.md). Ti = Kp/Ki is the
  * integral time, parked on the motor's tau:
- *   L: Kp = 0.1437, Ki = 0.7184  (Ti = 0.200 s)
- *   R: Kp = 0.1484, Ki = 0.8020  (Ti = 0.185 s) */
-#define WHEEL_PI_KP_L   0.1437f
-#define WHEEL_PI_KI_L   0.7184f
-#define WHEEL_PI_KP_R   0.1484f
-#define WHEEL_PI_KI_R   0.8020f
+ *   L: Kp = 0.1455, Ki = 0.6737  (Ti = 0.216 s)
+ *   R: Kp = 0.1554, Ki = 0.8265  (Ti = 0.188 s) */
+#define WHEEL_PI_KP_L   0.1455f
+#define WHEEL_PI_KI_L   0.6737f
+#define WHEEL_PI_KP_R   0.1554f
+#define WHEEL_PI_KI_R   0.8265f
+
+/* Per-wheel steady-state gain K [rad/s per unit duty] from motor identification
+ * (experiments/motors_identify/motor_id.m). Used by the feedforward term
+ * u_ff = w_set / K, which supplies the bulk of the hold duty so the integrator
+ * only has to trim the residual. */
+#define WHEEL_PI_K_L    34.36f
+#define WHEEL_PI_K_R    32.18f
 
 /* Deadband compensation: inside a small neutral zone the command is forced to 0
  * (no dithering around rest); outside it, the magnitude is floored so the command
@@ -28,9 +35,9 @@
  * hard reverse (which would jerk the robot and stress the gearbox). */
 #define WHEEL_PI_BRAKE_MAX    0.4f
 
-/* Integral-state clamp, in duty units. With no feedforward the integrator must
- * supply the whole steady-state hold duty, so its legitimate range is exactly
- * the output limit - clamp it there rather than above what the PWM can deliver. */
+/* Integral-state clamp, in duty units. The feedforward supplies most of the
+ * steady-state hold duty; the integrator only trims the residual, but clamp it
+ * at the output limit so it can still recover a wheel that is far off. */
 #define WHEEL_PI_I_MAX        WHEEL_PI_DUTY_MAX
 
 /* First-order low-pass on the (quantization-noisy at 200 Hz) speed measurement.
@@ -42,8 +49,10 @@
  * per-wheel because the two motors are not identical. */
 static volatile float s_kp[2]    = { WHEEL_PI_KP_L, WHEEL_PI_KP_R };
 static volatile float s_ki[2]    = { WHEEL_PI_KI_L, WHEEL_PI_KI_R };
+static volatile float s_kff[2]   = { WHEEL_PI_K_L, WHEEL_PI_K_R };   /* feedforward K, rad/s per duty */
 static volatile float s_w_set[2] = { 0.0f, 0.0f };   /* per-wheel setpoint, rad/s */
-static volatile bool  s_db_en    = true;             /* deadband compensation on/off */
+static volatile bool  s_db_en    = false;            /* deadband compensation on/off */
+static volatile bool  s_ff_en    = true;             /* feedforward on/off */
 
 /* Per-wheel state, touched only by the control loop. */
 static float s_i_acc[2];    /* integral accumulator, duty units */
@@ -72,12 +81,18 @@ float wheel_pi_ki(int i)                             { return s_ki[i]; }
 
 void wheel_pi_reset_gains(void)
 {
-    s_kp[0] = WHEEL_PI_KP_L; s_ki[0] = WHEEL_PI_KI_L;
-    s_kp[1] = WHEEL_PI_KP_R; s_ki[1] = WHEEL_PI_KI_R;
+    s_kp[0] = WHEEL_PI_KP_L; s_ki[0] = WHEEL_PI_KI_L; s_kff[0] = WHEEL_PI_K_L;
+    s_kp[1] = WHEEL_PI_KP_R; s_ki[1] = WHEEL_PI_KI_R; s_kff[1] = WHEEL_PI_K_R;
 }
+
+void  wheel_pi_set_kff(int i, float k) { s_kff[i] = k; }
+float wheel_pi_kff(int i)              { return s_kff[i]; }
 
 void wheel_pi_set_deadband(bool on) { s_db_en = on; }
 bool wheel_pi_deadband(void)        { return s_db_en; }
+
+void wheel_pi_set_ff(bool on) { s_ff_en = on; }
+bool wheel_pi_ff(void)        { return s_ff_en; }
 
 /* Remap a raw command through the deadband: a 2% neutral zone maps to 0, and
  * outside it the magnitude is floored at WHEEL_PI_DB_FLOOR so a small PI output
@@ -103,8 +118,14 @@ float wheel_pi_step(int i, float w_meas, float dt)
     float w_set = s_w_set[i];
     float e     = w_set - s_w_filt[i];
 
-    /* P + I, before deadband and saturation. */
-    float u = s_kp[i] * e + s_i_acc[i];
+    /* Model-based feedforward: the duty that the identified plant needs to hold
+     * w_set in steady state (u_ff = w_set / K). Leaves the PI to correct only the
+     * residual. Guard against a zero/invalid K. */
+    float u_ff = 0.0f;
+    if (s_ff_en && s_kff[i] != 0.0f) u_ff = w_set / s_kff[i];
+
+    /* FF + P + I, before deadband and saturation. */
+    float u = u_ff + s_kp[i] * e + s_i_acc[i];
     s_u_raw[i] = u;                 /* publish the raw command for analysis telemetry */
 
     float duty     = s_db_en ? deadband_compensate(u) : u;

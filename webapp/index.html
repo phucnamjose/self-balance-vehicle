@@ -176,17 +176,21 @@
 
     <div class="row" style="margin-top:10px">
       <span class="k">gains L:</span>
-      <span class="k">Kp</span><input type="number" id="gkpL" value="0.1437" step="0.001" />
-      <span class="k">Ki</span><input type="number" id="gkiL" value="0.7184" step="0.001" />
+      <span class="k">Kp</span><input type="number" id="gkpL" value="0.1455" step="0.001" />
+      <span class="k">Ki</span><input type="number" id="gkiL" value="0.6737" step="0.001" />
       <span class="k" style="margin-left:10px">R:</span>
-      <span class="k">Kp</span><input type="number" id="gkpR" value="0.1484" step="0.001" />
-      <span class="k">Ki</span><input type="number" id="gkiR" value="0.8020" step="0.001" />
+      <span class="k">Kp</span><input type="number" id="gkpR" value="0.1554" step="0.001" />
+      <span class="k">Ki</span><input type="number" id="gkiR" value="0.8265" step="0.001" />
       <button onclick="applyGains()">Set</button>
       <button class="ghost" onclick="send('gains default')">Default</button>
       <button class="ghost" onclick="send('gains')">Report</button>
       <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px; cursor:pointer">
-        <input type="checkbox" id="dbcomp" checked onchange="send('dbcomp ' + (this.checked ? 'on' : 'off'))">
+        <input type="checkbox" id="dbcomp" onchange="send('dbcomp ' + (this.checked ? 'on' : 'off'))">
         deadband comp
+      </label>
+      <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px; cursor:pointer">
+        <input type="checkbox" id="ff" checked onchange="send('ff ' + (this.checked ? 'on' : 'off'))">
+        feedforward
       </label>
     </div>
 
