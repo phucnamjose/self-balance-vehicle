@@ -73,7 +73,9 @@ foundation the rest of the stack stands on, so it comes first.
 > The diagram is the continuous-time idealization used for design and tuning. On
 > the robot it runs discretely - inner speed + balance loops at 200 Hz, the outer
 > velocity/yaw loops sub-rated to ~50 Hz. The whole rate stack (PWM, IMU, control
-> tick, cascade sub-rates, telemetry) is designed in [loop-rates.md](loop-rates.md).
+> tick, cascade sub-rates, telemetry) is designed in [loop-rates.md](loop-rates.md),
+> and how each continuous law $C(s)$ becomes the difference equations that actually
+> run is in [pi-discretization.md](pi-discretization.md).
 
 ## Naming scheme
 

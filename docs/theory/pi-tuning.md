@@ -265,6 +265,8 @@ plot((1:N)*dt, W); grid on; xlabel('t [s]'); ylabel('\omega [rad/s]');
 These $K_p$, $K_i$ drop straight into the
 [wheel-speed-controller](wheel-speed-controller.md) control law, on top of its
 feedforward ($u_{ff} = \omega_{set}/K$), deadband compensation, and anti-windup.
+The continuous $C(s)$ tuned here becomes the per-tick difference equations that run
+in firmware via the discretization in [pi-discretization.md](pi-discretization.md).
 Because the feedforward already supplies most of the duty, the PI only trims the
 residual, so the cancellation-based gains are a conservative, robust starting
 point - then fine-tune on hardware against a real step.

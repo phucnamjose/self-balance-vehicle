@@ -4,10 +4,6 @@ The inner loop of the cascade (see [README.md](README.md)). One instance per
 wheel regulates that wheel's **angular speed** to a commanded setpoint, so the
 two non-identical motors behave identically to whatever sits above them.
 
-> Status: **design** (this step). Firmware is not written yet; the existing
-> control loop is still open-loop
-> ([../../firmware/main/control.c](../../firmware/main/control.c) lines 80-85).
-
 ## Purpose
 
 Regulate one wheel's angular speed to a setpoint, independently of the other
@@ -15,22 +11,6 @@ wheel. This rejects the per-motor differences (unit variation, gearbox friction,
 deadband, back-EMF) so an upper loop can command a single common speed and trust
 that **both wheels actually reach it** - the robot drives straight instead of
 veering.
-
-## Interface
-
-| | Quantity | Unit | Source / sink |
-|---|----------|------|---------------|
-| Input | speed setpoint `w_set` | rad/s | upper loop (manual web command for bring-up) |
-| Input | measured speed `w_meas` | rad/s | encoders (per-tick rate) |
-| Input | `dt` | s | control tick, `1/CONTROL_HZ = 0.005 s` |
-| Output | `duty` | `[-1, 1]` | `motor_set(i, duty)` ([../../firmware/main/motors.h](../../firmware/main/motors.h)) |
-
-- One instance per wheel, index `0 = L`, `1 = R` (same indexing as the rest of
-  the firmware).
-- Runs every control tick at `CONTROL_HZ` (200 Hz,
-  [../../firmware/main/telemetry.h](../../firmware/main/telemetry.h)).
-- `w_meas` comes from `encoder_cps_to_radps()`
-  ([../../firmware/main/encoders.c](../../firmware/main/encoders.c)).
 
 ## Control law
 
@@ -61,7 +41,10 @@ from duty to angular speed. Encoder feedback is idealized as unity:
 ```
 
 PI on the speed error plus a **feedforward** term, then deadband compensation,
-then output saturation:
+then output saturation. The pseudocode below is the continuous law written as a
+per-tick update; how that update is *derived* from $C(s) = K_p + K_i/s$ (which
+discretization rule, and why it is safe at 200 Hz) is in
+[pi-discretization.md](pi-discretization.md):
 
 ```
 e        = w_set - w_meas                 # speed error [rad/s]
@@ -80,11 +63,17 @@ The motor model (`G_m(s) = K/(tau*s+1)`, measured per
 duty to speed, so a near-correct duty for a target speed is known in advance:
 
 ```
-ff(w_set) = w_set / w_noload          # w_noload = 333 * 2*pi/60 ~= 34.9 rad/s
+u_ff(w_set) = w_set / K               # K = steady-state gain [rad/s per duty]
 ```
+
+`K` is the per-wheel steady-state gain (no-load speed at full duty) from motor
+identification ([../../experiments/motors_identify/motor_id.m](../../experiments/motors_identify/motor_id.m)):
+`K_L ~= 34.36`, `K_R ~= 32.18 rad/s per duty`.
 
 The feedforward does most of the work; the PI only trims the residual error
 (load, mismatch, battery sag). This keeps the PI gains small and the loop stable.
+It can be toggled at runtime (`ff on|off`, or the *feedforward* checkbox in the
+web UI) to compare against pure PI.
 
 ### Deadband compensation
 

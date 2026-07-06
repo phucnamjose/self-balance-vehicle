@@ -63,7 +63,7 @@ Goal: physical integration.
 Goal: understand the model before controlling it.s
 
 - [x] Motor identification
-- [ ] PI tuning for motor speed
+- [x] PI tuning for motor speed
 - [ ] Kalman filter for state estimation
 - [ ] Inverted pendulum model
 - [ ] Tuning for balancing
@@ -95,6 +95,7 @@ learned, where the code lives.
 
 | Date | Phase / Step | Notes |
 |------|--------------|-------|
+| 2026-07-07 | P9 / control | Re-tuned + re-added feedforward to the wheel-speed loop. Added **model-based feedforward** `u_ff = w_set / K` back in (`wheel_pi.c/.h`), per-wheel `K` from motor id (L 34.36, R 32.18 rad/s/duty), runtime-toggleable (`ff on\|off` + web checkbox, on by default). Re-tuned default gains (L Kp=0.1455 Ki=0.6737 Ti=0.216; R Kp=0.1554 Ki=0.8265 Ti=0.188). **Deadband compensation now OFF by default**. New analysis telemetry: raw PI command pre-deadband/saturation (`wheel_pi_raw()` -> motors topic `uL`/`uR` + JSON), plotted as dashed "raw L/R" series on the motor-output chart. Adapted `experiments/motors_identify/motor_id.m` to the new CSV (header-mapped columns, tolerates added `uL`/`uR`; fixed the sim `addpath`; K shown to 2 dp in the fit plot). |
 | 2026-07-06 | P9 / control | Implemented the inner **wheel-speed PI controller** in firmware. New `firmware/main/wheel_pi.c/.h`: per-wheel PI on the encoder speed error, deadband compensation (0.10), output cap +/-0.95, conditional-integration anti-windup, 8 ms measurement low-pass. Per-wheel gains tuned on hardware (L Kp=0.1437 Ki=0.7184 Ti=0.200; R Kp=0.1484 Ki=0.8020 Ti=0.185). Wired into `control.c` (runs on `exp motor-ctrl` / `ctrl on`; per-tick speed now computed before the command decision; integrator reset on the rising edge into closed loop). Telemetry carries per-wheel setpoints (motors topic `velL_sp`/`velR_sp` + JSON `wsetL`/`wsetR`). New WS commands `speed <l\|r\|both> <rad/s>` and `gains <l\|r\|both> <kp> <ki>`; `help` is now a multi-line guide. Tried a `w_set/w_noload` feedforward, then removed it - PI alone. |
 | 2026-07-04 | P4 S2 | Measured the deadband with the sweep: both motors start moving at ~10% duty. Saved `deadband = 0.10` as the constant (`simulation/params.m` `p.motor.deadband`, was 0.05 seed) and updated the control docs (`wheel-speed-controller.md`, `simulation/MAPPING.md`). |
 | 2026-07-03 | P4 S2 | Added a motor deadband finder (`deadband` WS command + "Find deadband" web button). In TEST_MOTORS it slowly ramps both motors 0->15% (rate 0.01 duty/s, ~15 s), latching per wheel the duty where its encoder first moves (>=5 counts), then repeats in reverse; reports the four thresholds (L +/-, R +/-) to the terminal. Report-only for now - feeds the deadband constant in `docs/theory/wheel-speed-controller.md`. State machine lives beside the playback player in `control.c`; result emitted from `reporter_task` (off the RT path, like the timing warning). |
