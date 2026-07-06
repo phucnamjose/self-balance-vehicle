@@ -39,8 +39,9 @@ between are three tabs, each matching an experiment mode:
    the deadband sweep (**Find deadband**), and the playback script uploader.
 2. **Motors controller** (`TEST_MOTOR_CONTROLLERS`) - per-wheel speed setpoint
    bar (`speed <l|r|both> <rad/s>`), live PI-gain editor (`gains ...`), numeric
-   setpoint/measured readouts, and a live plot of measured vs. setpoint wheel
-   speed (last 10 s).
+   setpoint/measured readouts, and two live plots (last 10 s): measured vs.
+   setpoint wheel speed, and the motor output (applied duty vs. the raw PI
+   command before deadband compensation and saturation).
 3. **Flashing** - the OTA `.bin` upload (plus STOP_CONTROL and rollback).
 
 Selecting the **Manual** or **Motors controller** tab also sends the matching

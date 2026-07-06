@@ -41,3 +41,7 @@ bool wheel_pi_deadband(void);
  * @p w_meas (rad/s) and the tick period @p dt (s), return the duty in [-1, +1]
  * to hand to motor_set(). Uses the common setpoint set above. */
 float wheel_pi_step(int i, float w_meas, float dt);
+
+/* Last raw PI output for wheel @p i (Kp*e + integral), i.e. the command BEFORE
+ * deadband compensation and saturation. For analysis/telemetry only. */
+float wheel_pi_raw(int i);

@@ -48,12 +48,14 @@ static volatile bool  s_db_en    = true;             /* deadband compensation on
 /* Per-wheel state, touched only by the control loop. */
 static float s_i_acc[2];    /* integral accumulator, duty units */
 static float s_w_filt[2];   /* filtered measured speed, rad/s */
+static float s_u_raw[2];    /* last raw PI output (pre-deadband/saturation), for telemetry */
 static bool  s_primed[2];   /* filter seeded on the first step after a reset */
 
 void wheel_pi_reset(void)
 {
     for (int i = 0; i < 2; i++) {
         s_i_acc[i]  = 0.0f;
+        s_u_raw[i]  = 0.0f;
         s_w_filt[i] = 0.0f;
         s_primed[i] = false;
     }
@@ -61,6 +63,8 @@ void wheel_pi_reset(void)
 
 void  wheel_pi_set_setpoint(int i, float w_set) { s_w_set[i] = w_set; }
 float wheel_pi_setpoint(int i)                   { return s_w_set[i]; }
+
+float wheel_pi_raw(int i) { return s_u_raw[i]; }
 
 void  wheel_pi_set_gains(int i, float kp, float ki) { s_kp[i] = kp; s_ki[i] = ki; }
 float wheel_pi_kp(int i)                             { return s_kp[i]; }
@@ -101,6 +105,7 @@ float wheel_pi_step(int i, float w_meas, float dt)
 
     /* P + I, before deadband and saturation. */
     float u = s_kp[i] * e + s_i_acc[i];
+    s_u_raw[i] = u;                 /* publish the raw command for analysis telemetry */
 
     float duty     = s_db_en ? deadband_compensate(u) : u;
     float duty_sat = duty;

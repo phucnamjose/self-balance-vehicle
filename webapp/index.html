@@ -175,14 +175,12 @@
     </div>
 
     <div class="row" style="margin-top:10px">
-      <span class="k">gains:</span>
-      <select id="gsel">
-        <option value="both">both</option>
-        <option value="l">left</option>
-        <option value="r">right</option>
-      </select>
-      <span class="k">Kp</span><input type="number" id="gkp" value="0.1437" step="0.001" />
-      <span class="k">Ki</span><input type="number" id="gki" value="0.7184" step="0.001" />
+      <span class="k">gains L:</span>
+      <span class="k">Kp</span><input type="number" id="gkpL" value="0.1437" step="0.001" />
+      <span class="k">Ki</span><input type="number" id="gkiL" value="0.7184" step="0.001" />
+      <span class="k" style="margin-left:10px">R:</span>
+      <span class="k">Kp</span><input type="number" id="gkpR" value="0.1484" step="0.001" />
+      <span class="k">Ki</span><input type="number" id="gkiR" value="0.8020" step="0.001" />
       <button onclick="applyGains()">Set</button>
       <button class="ghost" onclick="send('gains default')">Default</button>
       <button class="ghost" onclick="send('gains')">Report</button>
@@ -212,6 +210,8 @@
       <div class="legend">
         <label><input type="checkbox" checked onchange="toggleSeries('plot2','mL',this.checked)"><i class="swatch" style="background:#34d399"></i>motor L</label>
         <label><input type="checkbox" checked onchange="toggleSeries('plot2','mR',this.checked)"><i class="swatch" style="background:#fbbf24"></i>motor R</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot2','uL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #34d399"></i>raw L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot2','uR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #fbbf24"></i>raw R</label>
         <span style="flex:1"></span>
         <button class="ghost" id="pausebtn" onclick="togglePause()">Pause</button>
         <button class="ghost" onclick="resetView()">Reset view</button>
@@ -310,7 +310,7 @@
     const TOPICS = {
       imu:    ['t', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp', 'ok'],
       angles: ['t', 'roll', 'pitch', 'roll_sp', 'pitch_sp'],
-      motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR'],
+      motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR', 'uL', 'uR'],
     };
     /* Turn one batch row into a flat object keyed by the topic's columns. */
     function rowToObj(cols, row) {
@@ -366,6 +366,7 @@
           add('WARN: ' + d.text, 'warn');
         } else if (d.type === 'resp') {
           add(d.text, 'resp');
+          syncGains(d.text);
         }
       };
     }
@@ -397,10 +398,10 @@
         /* While paused, ignore incoming samples entirely - the frozen view is
          * kept as-is; Reset view (or Resume) drops back to the live series. */
         if (!paused) {
-          for (const r of rows) {
-            const o = rowToObj(cols, r);
-            pushPlot(o.t / 1e6, o.velL, o.velR, o.velL_sp, o.velR_sp, o.mL, o.mR);
-          }
+        for (const r of rows) {
+          const o = rowToObj(cols, r);
+          pushPlot(o.t / 1e6, o.velL, o.velR, o.velL_sp, o.velR_sp, o.mL, o.mR, o.uL, o.uR);
+        }
           scheduleDraw();
         }
       }
@@ -431,14 +432,16 @@
         { key: 'spL', color: '#6ea8fe', dash: [5, 4] },
         { key: 'spR', color: '#f472b6', dash: [5, 4] },
       ] },
-      plot2: { id: 'plot2', base: [-1, 1], yview: null, series: [
+      plot2: { id: 'plot2', base: null, yview: null, series: [
         { key: 'mL', color: '#34d399', dash: [] },
         { key: 'mR', color: '#fbbf24', dash: [] },
+        { key: 'uL', color: '#34d399', dash: [5, 4] },
+        { key: 'uR', color: '#fbbf24', dash: [5, 4] },
       ] },
     };
 
-    function pushPlot(t, vL, vR, spL, spR, mL, mR) {
-      plotData.push({ t, vL, vR, spL, spR, mL, mR });
+    function pushPlot(t, vL, vR, spL, spR, mL, mR, uL, uR) {
+      plotData.push({ t, vL, vR, spL, spR, mL, mR, uL, uR });
       const tmin = t - RETAIN_S;
       while (plotData.length && plotData[0].t < tmin) plotData.shift();
     }
@@ -746,8 +749,19 @@
     function applySpeed() { send(`speed ${document.getElementById('ssel').value} ${document.getElementById('sval').value}`); }
     function stopSpeed()  { send('speed both 0'); }
     function applyGains() {
-      send(`gains ${document.getElementById('gsel').value} ` +
-           `${document.getElementById('gkp').value} ${document.getElementById('gki').value}`);
+      const g = (id) => document.getElementById(id).value;
+      send(`gains l ${g('gkpL')} ${g('gkiL')}`);
+      send(`gains r ${g('gkpR')} ${g('gkiR')}`);
+    }
+    /* Keep the gain boxes in sync with the firmware's "PI gains: L Kp=.. Ki=..
+     * R Kp=.. Ki=.." report (sent by 'gains', 'gains default' and 'gains <..>'). */
+    function syncGains(text) {
+      const m = text.match(/L Kp=([-\d.]+) Ki=([-\d.]+)\s+R Kp=([-\d.]+) Ki=([-\d.]+)/);
+      if (!m) return;
+      document.getElementById('gkpL').value = m[1];
+      document.getElementById('gkiL').value = m[2];
+      document.getElementById('gkpR').value = m[3];
+      document.getElementById('gkiR').value = m[4];
     }
 
     /* ---- tabs. Selecting Manual / Controller also puts the firmware in the

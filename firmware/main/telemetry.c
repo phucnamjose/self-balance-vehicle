@@ -34,20 +34,24 @@ int telemetry_latest_json(char *buf, size_t len, const char *type)
 
     /* Setpoints are NaN when running open loop; emit JSON null there so the frame
      * still parses (bare NaN is not valid JSON). */
-    char wsetL[16], wsetR[16];
+    char wsetL[16], wsetR[16], uL[16], uR[16];
     if (isnan(s.wsetL)) snprintf(wsetL, sizeof(wsetL), "null");
     else                snprintf(wsetL, sizeof(wsetL), "%.3f", (double)s.wsetL);
     if (isnan(s.wsetR)) snprintf(wsetR, sizeof(wsetR), "null");
     else                snprintf(wsetR, sizeof(wsetR), "%.3f", (double)s.wsetR);
+    if (isnan(s.uL))    snprintf(uL, sizeof(uL), "null");
+    else                snprintf(uL, sizeof(uL), "%.4f", (double)s.uL);
+    if (isnan(s.uR))    snprintf(uR, sizeof(uR), "null");
+    else                snprintf(uR, sizeof(uR), "%.4f", (double)s.uR);
 
     return snprintf(buf, len,
         "{\"type\":\"%s\",\"rate\":%d,\"t\":%.3f,"
-        "\"mL\":%.2f,\"mR\":%.2f,\"wsetL\":%s,\"wsetR\":%s,"
+        "\"mL\":%.2f,\"mR\":%.2f,\"wsetL\":%s,\"wsetR\":%s,\"uL\":%s,\"uR\":%s,"
         "\"posL\":%.4f,\"posR\":%.4f,\"velL\":%.3f,\"velR\":%.3f,"
         "\"imu_ok\":%d,\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,"
         "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,\"temp\":%.1f}",
         type, CONTROL_HZ, (double)s.t_us / 1e6,
-        s.mL, s.mR, wsetL, wsetR, s.posL, s.posR, s.velL, s.velR,
+        s.mL, s.mR, wsetL, wsetR, uL, uR, s.posL, s.posR, s.velL, s.velR,
         s.imu.ok ? 1 : 0,
         s.imu.ax, s.imu.ay, s.imu.az,
         s.imu.gx, s.imu.gy, s.imu.gz, s.imu.temp_c);
@@ -115,15 +119,17 @@ static int pack_angles(uint8_t *b, const sample_t *s)
     return (int)(p - b);
 }
 
-/* motors: [ t(us), velL, velR, velL_sp, velR_sp, mL, mR ]
+/* motors: [ t(us), velL, velR, velL_sp, velR_sp, mL, mR, uL, uR ]
  *   velL,velR  rad/s (measured)   *_sp  per-wheel rad/s setpoint (NaN when open
- *   loop)   mL,mR  -1..+1 */
+ *   loop)   mL,mR  applied duty -1..+1   uL,uR  raw PI output pre-deadband/sat
+ *   (NaN when open loop) */
 static int pack_motors(uint8_t *b, const sample_t *s)
 {
     uint8_t *p = put_t(b, s);
     p = put_f32(p, s->velL);  p = put_f32(p, s->velR);
     p = put_f32(p, s->wsetL); p = put_f32(p, s->wsetR);
     p = put_f32(p, s->mL);    p = put_f32(p, s->mR);
+    p = put_f32(p, s->uL);    p = put_f32(p, s->uR);
     return (int)(p - b);
 }
 
@@ -132,7 +138,7 @@ typedef struct { const char *name; uint8_t fields; pack_fn pack; } topic_t;
 static const topic_t TOPICS[] = {
     { "imu",    9, pack_imu },
     { "angles", 5, pack_angles },
-    { "motors", 7, pack_motors },
+    { "motors", 9, pack_motors },
 };
 #define NUM_TOPICS ((int)(sizeof(TOPICS) / sizeof(TOPICS[0])))
 

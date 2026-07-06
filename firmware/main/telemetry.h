@@ -44,6 +44,7 @@ typedef struct {
     float   velL, velR;    /* wheel angular speed, rad/s */
     float   roll, pitch;   /* orientation estimate, rad (NaN when estimation off) */
     float   wsetL, wsetR;  /* per-wheel speed setpoint, rad/s (NaN when open loop) */
+    float   uL, uR;        /* raw PI output pre-deadband/sat (NaN when open loop) */
     float   mL, mR;        /* commanded motor effort, -1..+1 */
     imu_t   imu;           /* latest IMU sample */
 } sample_t;
