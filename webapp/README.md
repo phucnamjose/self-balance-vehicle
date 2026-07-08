@@ -33,7 +33,7 @@ travel over Wi-Fi to the device; everything else is local.
 
 The top card (connection, control-task START/STOP, live IMU/motor/encoder
 readouts) is always visible; the terminal + data log sit at the bottom. In
-between are three tabs, each matching an experiment mode:
+between are the tabs, each matching an experiment mode:
 
 1. **Manual** (`TEST_MOTORS`) - open-loop duty bar (`l`/`r`/`both` + slider),
    the deadband sweep (**Find deadband**), and the playback script uploader.
@@ -42,11 +42,23 @@ between are three tabs, each matching an experiment mode:
    setpoint/measured readouts, and two live plots (last 10 s): measured vs.
    setpoint wheel speed, and the motor output (applied duty vs. the raw PI
    command before deadband compensation and saturation).
-3. **Flashing** - the OTA `.bin` upload (plus STOP_CONTROL and rollback).
+3. **Angle Estimator** (`TEST_ANGLES_ESTIMATION`) - the firmware tilt estimate:
+   pitch readout, complementary-filter `alpha` editor, the attitude vector view,
+   and a pitch plot.
+4. **Balance** (`TEST_BALANCE`) - the self-balancing tilt loop
+   (`docs/theory/balance-controller.md`). **Start/STOP balancing** buttons
+   (`balance on`/`off`), the balance-PID tuning boxes (`bgains <kp> <ki> <kd>`,
+   trim `btrim`), and four live views reused from the other tabs: the attitude
+   vector, the pitch plot, the wheel-speed plot (setpoint = the balance command
+   `w_common`), and the motor-output plot. Entering the tab is **safe** - it
+   turns estimation on but leaves the balance loop off until you click **Start
+   balancing** (the motors do not move on tab switch). Gains are untuned seeds.
+5. **Flashing** - the OTA `.bin` upload (plus STOP_CONTROL and rollback).
 
-Selecting the **Manual** or **Motors controller** tab also sends the matching
-`exp` command so the panel's controls take effect. You still need the control
-task running (**START**, top bar); flashing needs it stopped (**STOP**).
+Selecting the **Manual**, **Motors controller** or **Angle Estimator** tab also
+sends the matching `exp` command so the panel's controls take effect. You still
+need the control task running (**START**, top bar); flashing needs it stopped
+(**STOP**).
 
 ## Notes
 

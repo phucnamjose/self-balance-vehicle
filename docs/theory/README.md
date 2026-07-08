@@ -85,7 +85,7 @@ keeps future files and docs predictable.
 | Name | Role | Output | Status |
 |------|------|--------|--------|
 | `wheel_speed_ctrl` | Inner per-wheel angular-speed loop (one instance per wheel) | motor duty `[-1, 1]` | **this step** |
-| `balance_ctrl` | Standing / upright tilt loop | common wheel speed `w_common` [rad/s] | later |
+| `balance_ctrl` | Standing / upright tilt loop | common wheel speed `w_common` [rad/s] | **in firmware (`balance_pid`), gains untuned** |
 | `velocity_ctrl` | Forward speed / position-hold | a tilt or speed target | later |
 | `yaw_ctrl` | Heading / turn-rate; sets the wheel differential | `w_diff` [rad/s] | later |
 | `mixer` | Combine common + differential into per-wheel setpoints | `w_set_L`, `w_set_R` | later |
@@ -103,6 +103,12 @@ Each controller links to its own design doc as it is written.
    `G_m(s)` (duty -> wheel speed) on hardware. **(done)**
 1. [wheel-speed-controller.md](wheel-speed-controller.md) - inner per-wheel
    angular-speed loop. **(current step)**
-2. `balance_ctrl` - standing/tilt loop. *(later)*
+2. [balance-controller.md](balance-controller.md) - standing/tilt loop
+   (`balance_ctrl`). *(in firmware as `balance_pid`; gains need hardware tuning)*
+   Rests on two foundations:
+   [inverted-pendulum.md](inverted-pendulum.md) - the plant model (why upright is
+   unstable, its poles, the 34 ms time-to-double, controllability); and
+   [angle-estimation.md](angle-estimation.md) - fusing the accelerometer + gyro
+   (complementary / Kalman filter) into the $\theta$, $\dot\theta$ it feeds back.
 3. `mixer` + `yaw_ctrl` - drive straight and steer. *(later)*
 4. `velocity_ctrl` - forward drive / station-keeping. *(later)*

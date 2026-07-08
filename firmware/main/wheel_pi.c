@@ -136,10 +136,10 @@ float wheel_pi_step(int i, float w_meas, float dt)
     /* Safety: when told to stop (w_set == 0) but still rolling, cap the braking
      * effort so we coast down instead of slamming into hard reverse. Applied to
      * duty_sat so the anti-windup below treats it as the effective limit. */
-    if (w_set == 0.0f) {
-        if (s_w_filt[i] > 0.0f)      duty_sat = fmaxf(duty_sat, -WHEEL_PI_BRAKE_MAX);
-        else if (s_w_filt[i] < 0.0f) duty_sat = fminf(duty_sat,  WHEEL_PI_BRAKE_MAX);
-    }
+    // if (w_set == 0.0f) {
+    //     if (s_w_filt[i] > 0.0f)      duty_sat = fmaxf(duty_sat, -WHEEL_PI_BRAKE_MAX);
+    //     else if (s_w_filt[i] < 0.0f) duty_sat = fminf(duty_sat,  WHEEL_PI_BRAKE_MAX);
+    // }
 
     /* Conditional-integration anti-windup: don't wind the integrator further in
      * the direction that is already saturating the output; still allow it to

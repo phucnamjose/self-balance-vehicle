@@ -136,12 +136,20 @@ One physical knob, $\tau_{cl}$: how fast the closed wheel loop should respond.
 - The inner loop should be several times faster than the future balance loop so
   the cascade does not fight itself (see [README.md](README.md)).
 
-Worked example, $\tau_{cl} = \tau/5 = 0.038\ \text{s}$:
+Worked example, $\tau_{cl} = \tau/5 = 0.038\ \text{s}$, for a nominal motor
+($K = 34$, $\tau = 0.19$):
 
 $$
 K_p = \frac{0.19}{34 \cdot 0.038} = 0.147, \qquad
 K_i = \frac{1}{34 \cdot 0.038} = 0.774
 $$
+
+These nominal values are the *starting point*; the firmware refines them **per
+wheel** on hardware (the two motors are not identical). The compiled-in defaults
+([../../firmware/main/wheel_pi.c](../../firmware/main/wheel_pi.c)) are **L:
+$K_p = 0.1455$, $K_i = 0.6737$** and **R: $K_p = 0.1554$, $K_i = 0.8265$** - both
+close to the nominal above, with the small spread being the motor mismatch. See
+[wheel-speed-controller.md](wheel-speed-controller.md) for the full default set.
 
 ## Frequency-domain check: Nyquist
 

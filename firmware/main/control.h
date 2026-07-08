@@ -40,16 +40,21 @@ typedef enum {
     TEST_MOTORS,             /* open-loop motor test: estimation OFF, controller OFF */
     TEST_MOTOR_CONTROLLERS,  /* wheel/motor controller ON, estimation OFF */
     TEST_ANGLES_ESTIMATION,  /* angle estimation ON, controller OFF */
+    TEST_BALANCE,            /* self-balance: estimation + wheel controller + balance loop ON */
 } experiment_mode_t;
 
-/* Apply an experiment preset (overwrites both feature flags). */
+/* Apply an experiment preset (overwrites the feature flags). */
 void control_set_experiment(experiment_mode_t mode);
 
-/* Individual feature flags read every tick by the control loop. */
+/* Individual feature flags read every tick by the control loop. The balance
+ * (outer) loop needs both estimation (for the tilt) and the wheel controller
+ * (the inner loop it commands) enabled to have any effect. */
 bool control_estimation_enabled(void);
 void control_set_estimation(bool on);
 bool control_controller_enabled(void);
 void control_set_controller(bool on);
+bool control_balance_enabled(void);
+void control_set_balance(bool on);
 
 /* Scripted open-loop motor playback (TEST_MOTORS only). Load a list of steps,
  * each "hold (mL,mR) for dur seconds" (mL,mR each -1..+1, at most PLAYBACK_MAX
@@ -75,3 +80,13 @@ int  control_playback_pos(void);
 void control_deadband_start(void);
 void control_deadband_stop(void);
 bool control_deadband_active(void);
+
+/* Gyro-bias calibration (any experiment). Averages the gyro for a couple of
+ * seconds while the robot is held motionless and stores the mean as the IMU's
+ * zero-rate bias, so the estimator integrates a debiased gyro. Orientation does
+ * not matter (gyro bias is orientation-independent) but the robot must be still;
+ * if motion is detected the bias is left unchanged. Requires START_CONTROL (the
+ * IMU is only read while the control loop runs). start() arms it; when it
+ * finishes the reporter broadcasts the result. active() reports progress. */
+void control_gyrocal_start(void);
+bool control_gyrocal_active(void);

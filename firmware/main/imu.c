@@ -40,6 +40,24 @@ static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mpu;       /* MPU6050 device on the I2C bus */
 static bool s_mpu_ok;                       /* did the IMU init succeed? */
 
+/* Gyro zero-rate bias (deg/s), subtracted from each read. Starts at 0 (raw);
+ * gyrocal (control.c) measures it at rest and stores it here. */
+static volatile float s_gyro_bias[3];       /* [gx, gy, gz] */
+
+void imu_set_gyro_bias(float bx, float by, float bz)
+{
+    s_gyro_bias[0] = bx;
+    s_gyro_bias[1] = by;
+    s_gyro_bias[2] = bz;
+}
+
+void imu_get_gyro_bias(float *bx, float *by, float *bz)
+{
+    if (bx) *bx = s_gyro_bias[0];
+    if (by) *by = s_gyro_bias[1];
+    if (bz) *bz = s_gyro_bias[2];
+}
+
 void i2c_init(void)
 {
     i2c_master_bus_config_t bus_cfg = {
@@ -145,9 +163,9 @@ imu_t mpu6050_read(void)
     s.ax = ax / MPU_ACCEL_LSB_PER_G;
     s.ay = ay / MPU_ACCEL_LSB_PER_G;
     s.az = az / MPU_ACCEL_LSB_PER_G;
-    s.gx = gx / MPU_GYRO_LSB_PER_DPS;
-    s.gy = gy / MPU_GYRO_LSB_PER_DPS;
-    s.gz = gz / MPU_GYRO_LSB_PER_DPS;
+    s.gx = gx / MPU_GYRO_LSB_PER_DPS - s_gyro_bias[0];
+    s.gy = gy / MPU_GYRO_LSB_PER_DPS - s_gyro_bias[1];
+    s.gz = gz / MPU_GYRO_LSB_PER_DPS - s_gyro_bias[2];
     s.temp_c = t / 340.0f + 36.53f;
     s.ok = true;
     return s;

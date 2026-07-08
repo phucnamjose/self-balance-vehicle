@@ -19,5 +19,14 @@ void i2c_scan(void);
 /* Attach + wake the MPU6050 into a known configuration. Returns true on success. */
 bool mpu6050_init(void);
 
-/* Read one accel/temp/gyro sample in physical units (imu_t.ok=false on failure). */
+/* Read one accel/temp/gyro sample in physical units (imu_t.ok=false on failure).
+ * The stored gyro zero-rate bias (see below) is subtracted from each axis. */
 imu_t mpu6050_read(void);
+
+/* Gyro zero-rate bias (deg/s), subtracted from every read so the integrated
+ * angle does not drift. Measured with the robot held still - see the gyrocal
+ * command (control.c) which averages the gyro at rest and calls the setter.
+ * Set/read from the control task; a plain assignment of three floats is benign
+ * across the (single) reader. */
+void imu_set_gyro_bias(float bx, float by, float bz);
+void imu_get_gyro_bias(float *bx, float *by, float *bz);

@@ -17,5 +17,7 @@ idf_component_register(
         "web_server.c"
         "control.c"
         "wheel_pi.c"
+        "balance_pid.c"
+        "estimator.c"
     INCLUDE_DIRS "."
 )

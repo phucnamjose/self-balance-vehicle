@@ -41,6 +41,15 @@
     .hint { color: var(--muted); font-size: 12px; }
     .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line2); color: var(--muted); }
 
+    /* Sticky control bar: keeps its buttons/readouts pinned to the top of the
+     * viewport while scrolling through a tall panel. Spans to the card edges and
+     * has a solid background so content scrolls cleanly underneath it. */
+    .stickybar {
+      position: sticky; top: 8px; z-index: 20;
+      background: var(--panel); margin: 0 -12px; padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
     /* tabs */
     #tabs { display: flex; gap: 6px; margin-top: 14px; border-bottom: 1px solid var(--line); }
     .tab {
@@ -120,6 +129,8 @@
   <div id="tabs">
     <button class="tab" data-tab="manual" onclick="showTab('manual')">Manual</button>
     <button class="tab" data-tab="ctrl" onclick="showTab('ctrl')">Motors controller</button>
+    <button class="tab" data-tab="angle" onclick="showTab('angle')">Angle Estimator</button>
+    <button class="tab" data-tab="balance" onclick="showTab('balance')">Balance</button>
     <button class="tab" data-tab="flash" onclick="showTab('flash')">Flashing</button>
   </div>
 
@@ -225,7 +236,112 @@
     </div>
   </div>
 
-  <!-- 3. Flashing panel -->
+  <!-- 3. Angle Estimator panel (TEST_ANGLES_ESTIMATION) -->
+  <div class="panel card" id="panel-angle">
+    <h2>Angle Estimator &mdash; body tilt from the IMU <span class="pill">pitch</span></h2>
+
+    <div class="row">
+      <span class="k">pitch (tilt &theta;):</span> <span class="v" id="pitchv">--</span>&deg;
+      <span style="width:14px"></span>
+      <span class="k">estimate:</span> <span class="pill" id="angsrc">--</span>
+      <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px; cursor:pointer">
+        <input type="checkbox" id="estchk" onchange="send('est ' + (this.checked ? 'on' : 'off'))">
+        estimation on
+      </label>
+    </div>
+    <div class="hint" style="margin-top:6px">the tilt is computed on the ESP32 by a complementary filter (accel + gyro, see docs/theory/angle-estimation.md); the page only displays it.</div>
+
+    <div class="row" style="margin-top:10px">
+      <span class="k">filter &alpha;:</span>
+      <input type="number" id="alphaIn" min="0" max="0.9999" step="0.001" value="0.980" />
+      <button onclick="applyAlpha()">Set</button>
+      <span class="hint" id="alphaHint">higher &alpha; trusts the gyro more (smoother, slower drift correction).</span>
+    </div>
+
+    <div class="row" style="margin-top:10px">
+      <span class="k">gyro bias:</span>
+      <button onclick="gyrocal()">Calibrate gyro</button>
+      <span class="hint" id="gyrocalHint">hold the robot still (any pose) for ~2 s; needs the control task running.</span>
+    </div>
+
+    <div class="plottitle">robot attitude &mdash; body tilt vector from upright</div>
+    <canvas id="attitude" class="plot" style="height:280px"></canvas>
+    <div class="hint" style="margin-top:4px">side view: front is to the right, so <code>+pitch</code> = tipped forward (X/Y/Z per docs/hardware/robot-mechanics.md).</div>
+
+    <div class="plottitle">pitch (deg) &mdash; last 10 s</div>
+    <canvas id="plot3" class="plot"></canvas>
+    <div class="legend">
+      <label><input type="checkbox" checked onchange="toggleSeries('plot3','pitch',this.checked)"><i class="swatch" style="background:#3b82f6"></i>pitch</label>
+      <span style="flex:1"></span>
+      <button class="ghost" id="pausebtn3" onclick="togglePause()">Pause</button>
+      <button class="ghost" onclick="resetView()">Reset view</button>
+      <button class="ghost" onclick="clearPlot()">Clear plots</button>
+    </div>
+    <div class="hint" style="margin-top:4px">scroll to zoom time &middot; shift+scroll to zoom magnitude &middot; drag to pan (when paused)</div>
+  </div>
+
+  <!-- 4. Balance panel (TEST_BALANCE) -->
+  <div class="panel card" id="panel-balance">
+    <h2>Balance &mdash; self-balancing tilt loop <span class="pill">TEST_BALANCE</span></h2>
+
+    <div class="row stickybar">
+      <button onclick="send('balance on')">Start balancing</button>
+      <button class="stopbtn" onclick="send('balance off')">STOP balancing</button>
+      <span style="width:14px"></span>
+      <span class="k">pitch (&theta;):</span> <span class="v" id="bpitchv">--</span>&deg;
+      <span class="k">w_common:</span> <span class="v" id="bwsp">--</span> <span class="k">rad/s</span>
+      <span class="k">motor L/R:</span> <span class="v" id="bmLR">--</span>
+    </div>
+    <div class="hint" style="margin-top:6px">the tilt PID drives both wheels to hold upright (docs/theory/balance-controller.md). <b>Safety:</b> motors cut past &plusmn;34&deg;; start near upright. Gains are untuned seeds &mdash; raise Kp until it holds, add Kd to damp, then a little Ki.</div>
+
+    <div class="row" style="margin-top:10px">
+      <span class="k">balance PID:</span>
+      <span class="k">Kp</span><input type="number" id="bkp" value="150" step="1" />
+      <span class="k">Ki</span><input type="number" id="bki" value="300" step="1" />
+      <span class="k">Kd</span><input type="number" id="bkd" value="12" step="0.5" />
+      <button onclick="applyBGains()">Set</button>
+      <button class="ghost" onclick="send('bgains default')">Default</button>
+      <button class="ghost" onclick="send('bgains')">Report</button>
+      <span style="width:10px"></span>
+      <span class="k">trim &theta;_ref</span><input type="number" id="btrimIn" value="0" step="0.005" />
+      <span class="k">rad</span>
+      <button onclick="applyBTrim()">Set</button>
+    </div>
+
+    <div class="plottitle">robot attitude &mdash; body tilt vector from upright</div>
+    <canvas id="battitude" class="plot" style="height:280px"></canvas>
+    <div class="hint" style="margin-top:4px">side view: front is to the right, so <code>+pitch</code> = tipped forward.</div>
+
+    <div class="plottitle">pitch (deg) &mdash; last 10 s</div>
+    <canvas id="bpitch" class="plot"></canvas>
+    <div class="legend">
+      <label><input type="checkbox" checked onchange="toggleSeries('bpitch','pitch',this.checked)"><i class="swatch" style="background:#3b82f6"></i>pitch</label>
+    </div>
+
+    <div class="plottitle">wheel speed (rad/s) &mdash; setpoint = balance command w_common</div>
+    <canvas id="bvel" class="plot"></canvas>
+    <div class="legend">
+      <label><input type="checkbox" checked onchange="toggleSeries('bvel','vL',this.checked)"><i class="swatch" style="background:#6ea8fe"></i>vel L</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bvel','vR',this.checked)"><i class="swatch" style="background:#f472b6"></i>vel R</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bvel','spL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #6ea8fe"></i>w_common</label>
+    </div>
+
+    <div class="plottitle">motor output (duty)</div>
+    <canvas id="bout" class="plot"></canvas>
+    <div class="legend">
+      <label><input type="checkbox" checked onchange="toggleSeries('bout','mL',this.checked)"><i class="swatch" style="background:#34d399"></i>motor L</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bout','mR',this.checked)"><i class="swatch" style="background:#fbbf24"></i>motor R</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bout','uL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #34d399"></i>raw L</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bout','uR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #fbbf24"></i>raw R</label>
+      <span style="flex:1"></span>
+      <button class="ghost" id="pausebtn4" onclick="togglePause()">Pause</button>
+      <button class="ghost" onclick="resetView()">Reset view</button>
+      <button class="ghost" onclick="clearPlot()">Clear plots</button>
+    </div>
+    <div class="hint" style="margin-top:4px">scroll to zoom time &middot; shift+scroll to zoom magnitude &middot; drag to pan (when paused)</div>
+  </div>
+
+  <!-- 5. Flashing panel -->
   <div class="panel card" id="panel-flash">
     <h2>Flashing &mdash; wireless firmware upload</h2>
     <div class="hint" style="margin-bottom:10px">Flashing is only allowed in <code>STOP_CONTROL</code>. Click STOP (top bar) first.</div>
@@ -293,6 +409,8 @@
       if (d.mL !== undefined) {
         mL.textContent = (d.mL * 100).toFixed(0) + '%';
         mR.textContent = (d.mR * 100).toFixed(0) + '%';
+        const bm = document.getElementById('bmLR');
+        if (bm) bm.textContent = `${(d.mL * 100).toFixed(0)}% / ${(d.mR * 100).toFixed(0)}%`;
       }
       if (d.velL !== undefined) {
         vel.textContent = `${f2(d.velL)} ${f2(d.velR)}`;
@@ -301,6 +419,8 @@
       if (d.velL_sp !== undefined) {
         const s = (v) => (v === null || v === undefined || Number.isNaN(v)) ? 'off' : f2(v);
         document.getElementById('spLR').textContent = `${s(d.velL_sp)} / ${s(d.velR_sp)}`;
+        const bw = document.getElementById('bwsp');
+        if (bw) bw.textContent = s(d.velL_sp);   /* balance drives both wheels to w_common */
       }
     }
 
@@ -361,8 +481,10 @@
             ? ` imu a=[${f2(d.ax)} ${f2(d.ay)} ${f2(d.az)}]g g=[${f1(d.gx)} ${f1(d.gy)} ${f1(d.gz)}]dps ${d.temp.toFixed(1)}C`
             : ' imu:off';
           const on = (x) => (x ? 'ON' : 'OFF');
+          const ec = document.getElementById('estchk');
+          if (ec && d.est !== undefined) ec.checked = !!d.est;
           let mode = d.cmode !== undefined
-            ? ` mode=${d.cmode} est=${on(d.est)} mctrl=${on(d.mctrl)}` : '';
+            ? ` mode=${d.cmode} est=${on(d.est)} mctrl=${on(d.mctrl)}${d.bal !== undefined ? ` bal=${on(d.bal)}` : ''}` : '';
           if (d.play_len) mode += ` play=${d.play_pos}/${d.play_len}${d.play ? '(running)' : ''}`;
           add(`stats: rate=${d.rate}Hz mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]% ` +
               `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}${mode}`, 'resp');
@@ -371,6 +493,9 @@
         } else if (d.type === 'resp') {
           add(d.text, 'resp');
           syncGains(d.text);
+          syncAlpha(d.text);
+          syncGyrocal(d.text);
+          syncBGains(d.text);
         }
       };
     }
@@ -396,6 +521,19 @@
       if (topic === 'imu') {
         setValues({ imu_ok: !!last.ok, ax: last.ax, ay: last.ay, az: last.az,
                     gx: last.gx, gy: last.gy, gz: last.gz, temp: last.temp });
+      } else if (topic === 'angles') {
+        /* Firmware pitch estimate (radians -> degrees). NaN while estimation is
+         * off; the page only reads and displays it. */
+        if (Number.isFinite(last.pitch)) {
+          if (!paused) for (const r of rows) {
+            const o = rowToObj(cols, r);
+            if (Number.isFinite(o.pitch)) pushAngle(o.t / 1e6, o.pitch * R2D);
+          }
+          setAngleReadout(last.pitch * R2D, 'firmware');
+        } else {
+          setAngleReadout(NaN, 'estimation off');
+        }
+        scheduleDraw();
       } else if (topic === 'motors') {
         setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR,
                     velL_sp: last.velL_sp, velR_sp: last.velR_sp });
@@ -409,47 +547,79 @@
           scheduleDraw();
         }
       }
-      /* 'angles' has no live readout yet (values are NaN until estimation). */
       if (recording && topic === recTopic) writeBatch(topic, cols, rows);
     }
 
     /* ---- live plots (canvas, no libraries) ---- */
     const RETAIN_S = 60;                       /* seconds of history kept in memory */
-    let plotData = [];                         /* {t, vL, vR, spL, spR, mL, mR} */
+    /* Two independent data groups, one per plotting tab: 'motors' feeds the wheel
+     * charts, 'angles' feeds the Angle Estimator chart. Only one plotting tab is
+     * visible at a time, so they share the time-window / pause view state below. */
+    const DATA = { motors: [], angles: [] };
     let drawPending = false;
 
-    /* View state shared by both charts (they share the time axis). winS is the
+    /* View state shared by the charts (they share the time axis). winS is the
      * visible time window; when paused, pausedRightT freezes the right edge so
-     * incoming data no longer scrolls the view. */
+     * incoming data no longer scrolls the view. activeSrc is the data group of
+     * the currently visible plotting tab (drives pause/latest-time). */
     const view = { winS: 10 };
     let paused = false;
     let pausedRightT = 0;
+    let activeSrc = 'motors';
 
     const PAD = { l: 44, r: 10, t: 10, b: 22 };
 
     /* Each chart: its series and an optional fixed base y-range. yview, when set
      * (by shift+scroll or drag), overrides auto-scaling until Reset view. */
     const CHARTS = {
-      plot:  { id: 'plot',  base: null,     yview: null, series: [
+      plot:  { id: 'plot',  src: 'motors', base: null, yview: null, series: [
         { key: 'vL',  color: '#6ea8fe', dash: [] },
         { key: 'vR',  color: '#f472b6', dash: [] },
         { key: 'spL', color: '#6ea8fe', dash: [5, 4] },
         { key: 'spR', color: '#f472b6', dash: [5, 4] },
       ] },
-      plot2: { id: 'plot2', base: null, yview: null, series: [
+      plot2: { id: 'plot2', src: 'motors', base: null, yview: null, series: [
         { key: 'mL', color: '#34d399', dash: [] },
         { key: 'mR', color: '#fbbf24', dash: [] },
         { key: 'uL', color: '#34d399', dash: [5, 4] },
         { key: 'uR', color: '#fbbf24', dash: [5, 4] },
       ] },
+      plot3: { id: 'plot3', src: 'angles', base: null, yview: null, series: [
+        { key: 'pitch', color: '#3b82f6', dash: [] },
+      ] },
+      /* Balance tab: reuse the same data groups (motors + angles both stream in
+       * TEST_BALANCE) across its own canvases. */
+      bvel:  { id: 'bvel',  src: 'motors', base: null, yview: null, series: [
+        { key: 'vL',  color: '#6ea8fe', dash: [] },
+        { key: 'vR',  color: '#f472b6', dash: [] },
+        { key: 'spL', color: '#6ea8fe', dash: [5, 4] },
+      ] },
+      bout:  { id: 'bout',  src: 'motors', base: null, yview: null, series: [
+        { key: 'mL', color: '#34d399', dash: [] },
+        { key: 'mR', color: '#fbbf24', dash: [] },
+        { key: 'uL', color: '#34d399', dash: [5, 4] },
+        { key: 'uR', color: '#fbbf24', dash: [5, 4] },
+      ] },
+      bpitch: { id: 'bpitch', src: 'angles', base: null, yview: null, series: [
+        { key: 'pitch', color: '#3b82f6', dash: [] },
+      ] },
     };
+    const CHART_LIST = [CHARTS.plot, CHARTS.plot2, CHARTS.plot3,
+                        CHARTS.bvel, CHARTS.bout, CHARTS.bpitch];
 
     function pushPlot(t, vL, vR, spL, spR, mL, mR, uL, uR) {
-      plotData.push({ t, vL, vR, spL, spR, mL, mR, uL, uR });
+      const d = DATA.motors;
+      d.push({ t, vL, vR, spL, spR, mL, mR, uL, uR });
       const tmin = t - RETAIN_S;
-      while (plotData.length && plotData[0].t < tmin) plotData.shift();
+      while (d.length && d[0].t < tmin) d.shift();
     }
-    function clearPlot() { plotData = []; scheduleDraw(); }
+    function pushAngle(t, pitch) {
+      const d = DATA.angles;
+      d.push({ t, pitch });
+      const tmin = t - RETAIN_S;
+      while (d.length && d[0].t < tmin) d.shift();
+    }
+    function clearPlot() { DATA.motors = []; DATA.angles = []; scheduleDraw(); }
 
     /* Show/hide one series from its legend checkbox. */
     function toggleSeries(chartId, key, on) {
@@ -459,8 +629,8 @@
       if (s) { s.visible = on; scheduleDraw(); }
     }
 
-    function latestT() { return plotData.length ? plotData[plotData.length - 1].t : 0; }
-    function rightEdgeT() { return paused ? pausedRightT : latestT(); }
+    function latestT(src) { const a = DATA[src]; return a.length ? a[a.length - 1].t : 0; }
+    function rightEdgeT(src) { return paused ? pausedRightT : latestT(src); }
     function geom(cv) {
       const W = cv.clientWidth, H = cv.clientHeight;
       return { W, H, x0: PAD.l, x1: W - PAD.r, y0: PAD.t, y1: H - PAD.b };
@@ -471,9 +641,10 @@
     function getRange(chart) {
       if (chart.yview) return chart.yview;
       if (chart.base) return chart.base.slice();
-      const tR = rightEdgeT(), tL = tR - view.winS;
+      const data = DATA[chart.src];
+      const tR = rightEdgeT(chart.src), tL = tR - view.winS;
       let lo = Infinity, hi = -Infinity;
-      for (const p of plotData) {
+      for (const p of data) {
         if (p.t < tL || p.t > tR) continue;
         for (const s of chart.series) {
           if (s.visible === false) continue;
@@ -486,27 +657,35 @@
       const pad = (hi - lo) * 0.1; return [lo - pad, hi + pad];
     }
 
+    /* Keep every tab's pause button label in sync with the shared paused state. */
+    function setPauseLabels() {
+      const t = paused ? 'Resume' : 'Pause';
+      for (const id of ['pausebtn', 'pausebtn3', 'pausebtn4']) {
+        const b = document.getElementById(id);
+        if (b) b.textContent = t;
+      }
+    }
     function togglePause() {
       paused = !paused;
-      if (paused) pausedRightT = latestT();
-      else plotData = [];   /* dropped samples while paused - restart from live */
-      document.getElementById('pausebtn').textContent = paused ? 'Resume' : 'Pause';
+      if (paused) pausedRightT = latestT(activeSrc);
+      else { DATA.motors = []; DATA.angles = []; }   /* dropped samples while paused */
+      setPauseLabels();
       updateCursor();
       scheduleDraw();
     }
     function resetView() {
       view.winS = 10; paused = false;
-      plotData = [];        /* back to the live series */
-      CHARTS.plot.yview = null; CHARTS.plot2.yview = null;
+      DATA.motors = []; DATA.angles = [];   /* back to the live series */
       /* restore every series to visible + re-check its legend box */
-      for (const c of [CHARTS.plot, CHARTS.plot2]) for (const s of c.series) s.visible = true;
+      for (const c of CHART_LIST) { c.yview = null; for (const s of c.series) s.visible = true; }
       document.querySelectorAll('.legend input[type=checkbox]').forEach((cb) => { cb.checked = true; });
-      document.getElementById('pausebtn').textContent = 'Pause';
+      setPauseLabels();
       updateCursor();
       scheduleDraw();
     }
+    const PLOT_IDS = ['plot', 'plot2', 'plot3', 'bvel', 'bout', 'bpitch'];
     function updateCursor() {
-      for (const id of ['plot', 'plot2']) {
+      for (const id of PLOT_IDS) {
         const cv = document.getElementById(id);
         if (cv) cv.style.cursor = paused ? 'grab' : 'default';
       }
@@ -517,8 +696,9 @@
       drawPending = true;
       requestAnimationFrame(() => {
         drawPending = false;
-        draw(CHARTS.plot);
-        draw(CHARTS.plot2);
+        for (const c of CHART_LIST) draw(c);
+        drawAttitude('attitude');
+        drawAttitude('battitude');
       });
     }
 
@@ -533,8 +713,9 @@
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.clearRect(0, 0, W, H);
 
+      const data = DATA[chart.src];
       const [lo, hi] = getRange(chart);
-      const tR = rightEdgeT(), tL = tR - view.winS;
+      const tR = rightEdgeT(chart.src), tL = tR - view.winS;
       const sx = (t) => x0 + (x1 - x0) * (t - tL) / (tR - tL);
       const sy = (v) => y1 - (y1 - y0) * (v - lo) / (hi - lo);
 
@@ -558,7 +739,7 @@
       /* x-axis time scale: vertical grid + labels in seconds relative to the
        * newest sample (0 = now, negative = older). Tick step adapts to the zoom
        * so there are ~5 ticks across whatever window is showing. */
-      const t0 = latestT();
+      const t0 = latestT(chart.src);
       const STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60];
       let step = STEPS[STEPS.length - 1];
       for (const s of STEPS) { if (s >= view.winS / 5) { step = s; break; } }
@@ -573,7 +754,7 @@
       }
       if (paused) { g.textAlign = 'right'; g.fillStyle = cAxis; g.fillText('paused', x1, y0); }
 
-      if (plotData.length >= 2) {
+      if (data.length >= 2) {
         g.save();
         g.beginPath(); g.rect(x0, y0, x1 - x0, y1 - y0); g.clip();
         for (const s of chart.series) {
@@ -582,7 +763,7 @@
           g.setLineDash(s.dash); g.globalAlpha = s.dash.length ? 0.8 : 1;
           g.beginPath();
           let started = false;
-          for (const p of plotData) {
+          for (const p of data) {
             if (p.t < tL - 1 || p.t > tR + 1) continue;   /* small margin off-screen */
             const v = p[s.key];
             if (v == null || Number.isNaN(v)) { started = false; continue; }
@@ -614,7 +795,7 @@
         const span = (hi - lo) * f;
         chart.yview = [vCur - frac * span, vCur - frac * span + span];
       } else {                                     /* zoom time (both charts) */
-        const tR = rightEdgeT();
+        const tR = rightEdgeT(chart.src);
         const frac = (x1 - mx) / (x1 - x0);        /* distance from right edge */
         const tCur = tR - frac * view.winS;
         view.winS = Math.min(RETAIN_S, Math.max(0.2, view.winS * f));
@@ -644,14 +825,96 @@
     }
     function onUp() { if (drag) { drag.cv.style.cursor = 'grab'; drag = null; } }
 
-    ['plot', 'plot2'].forEach((id) => {
+    PLOT_IDS.forEach((id) => {
       const cv = document.getElementById(id);
+      if (!cv) return;
       cv.addEventListener('wheel', onWheel, { passive: false });
       cv.addEventListener('mousedown', onDown);
     });
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     window.addEventListener('resize', scheduleDraw);
+
+    /* ---- Angle Estimator: display the firmware pitch (tilt) + attitude vector ----
+     * pitch is estimated on the ESP32 (topic 'angles', radians); the page only
+     * reads it. Axis conventions: docs/hardware/robot-mechanics.md. */
+    const R2D = 180 / Math.PI;
+    let lastPitchDeg = NaN;   /* newest tilt -> the vector */
+
+    function setAngleReadout(pitchDeg, src) {
+      lastPitchDeg = pitchDeg;
+      const pv = document.getElementById('pitchv');
+      const sv = document.getElementById('angsrc');
+      if (pv) pv.textContent = Number.isNaN(pitchDeg) ? '--' : f1(pitchDeg);
+      if (sv) sv.textContent = src;
+      const bpv = document.getElementById('bpitchv');
+      if (bpv) bpv.textContent = Number.isNaN(pitchDeg) ? '--' : f1(pitchDeg);
+    }
+
+    /* Attitude view: the body tilt vector (pitch) from upright, side view with the
+     * robot front to the right. Reads the latest lastPitchDeg. */
+    function drawAttitude(id) {
+      const cv = document.getElementById(id || 'attitude');
+      if (!cv) return;
+      const W = cv.clientWidth, H = cv.clientHeight;
+      if (!W || !H) return;                  /* panel hidden */
+      const dpr = window.devicePixelRatio || 1;
+      if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+      const g = cv.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
+
+      const cs = getComputedStyle(document.body);
+      const cGrid = cs.getPropertyValue('--grid').trim() || '#222a35';
+      const cAxis = cs.getPropertyValue('--axis').trim() || '#8b96a5';
+      const cMut  = cs.getPropertyValue('--muted').trim() || '#8b96a5';
+
+      const panels = [
+        { cx: W * 0.5, title: 'Pitch (tilt \u03b8) \u2014 side view (front \u2192)', ang: lastPitchDeg, color: '#3b82f6' },
+      ];
+      const pivotY = H * 0.80, len = H * 0.58, r = 11;
+      g.textAlign = 'center'; g.font = '12px monospace';
+
+      for (const p of panels) {
+        g.strokeStyle = cGrid; g.lineWidth = 1;                 /* ground */
+        g.beginPath(); g.moveTo(p.cx - len * 0.85, pivotY); g.lineTo(p.cx + len * 0.85, pivotY); g.stroke();
+        g.strokeStyle = cMut; g.setLineDash([5, 5]); g.lineWidth = 1;   /* upright ref */
+        g.beginPath(); g.moveTo(p.cx, pivotY); g.lineTo(p.cx, pivotY - len); g.stroke();
+        g.setLineDash([]);
+        g.fillStyle = cMut; g.textBaseline = 'top';
+        g.fillText(p.title, p.cx, 6);
+
+        const ang = p.ang;
+        if (Number.isNaN(ang)) {
+          g.fillStyle = cMut; g.textBaseline = 'middle';
+          g.fillText('no estimate', p.cx, pivotY - len / 2);
+          g.fillStyle = cAxis; g.beginPath(); g.arc(p.cx, pivotY, r, 0, 2 * Math.PI); g.fill();
+          continue;
+        }
+        const rad = ang * Math.PI / 180;
+        const tx = p.cx + len * Math.sin(rad);
+        const ty = pivotY - len * Math.cos(rad);
+        const a0 = -Math.PI / 2, a1 = -Math.PI / 2 + rad;       /* angle arc */
+        g.strokeStyle = cMut; g.lineWidth = 1;
+        g.beginPath(); g.arc(p.cx, pivotY, len * 0.32, Math.min(a0, a1), Math.max(a0, a1)); g.stroke();
+        g.strokeStyle = p.color; g.lineWidth = 4; g.lineCap = 'round';   /* body vector */
+        g.beginPath(); g.moveTo(p.cx, pivotY); g.lineTo(tx, ty); g.stroke();
+        g.lineCap = 'butt';
+        arrowHead(g, p.cx, pivotY, tx, ty, p.color);
+        g.fillStyle = cAxis; g.beginPath(); g.arc(p.cx, pivotY, r, 0, 2 * Math.PI); g.fill();
+        g.fillStyle = p.color; g.textBaseline = 'bottom';
+        g.fillText(f1(ang) + '\u00b0', p.cx, pivotY - len - 8);
+      }
+    }
+    function arrowHead(g, x0, y0, x1, y1, col) {
+      const a = Math.atan2(y1 - y0, x1 - x0), s = 13;
+      g.fillStyle = col; g.beginPath();
+      g.moveTo(x1, y1);
+      g.lineTo(x1 - s * Math.cos(a - 0.42), y1 - s * Math.sin(a - 0.42));
+      g.lineTo(x1 - s * Math.cos(a + 0.42), y1 - s * Math.sin(a + 0.42));
+      g.closePath(); g.fill();
+    }
+
 
     /* ---- recording the telemetry stream to a CSV file ----
      * Prefer the File System Access API (streams straight to disk); fall back to
@@ -768,17 +1031,71 @@
       document.getElementById('gkiR').value = m[4];
     }
 
+    /* Balance PID tuning: send the three gains / trim and keep the boxes in sync
+     * with the firmware's "balance PID: Kp=.. Ki=.. Kd=.. (theta_ref=.. rad)" and
+     * "balance trim theta_ref = .. rad" replies. */
+    function applyBGains() {
+      const g = (id) => document.getElementById(id).value;
+      send(`bgains ${g('bkp')} ${g('bki')} ${g('bkd')}`);
+    }
+    function applyBTrim() { send('btrim ' + document.getElementById('btrimIn').value); }
+    function syncBGains(text) {
+      const m = text.match(/balance PID: Kp=([-\d.]+) Ki=([-\d.]+) Kd=([-\d.]+)/);
+      if (m) {
+        const set = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
+        set('bkp', m[1]); set('bki', m[2]); set('bkd', m[3]);
+      }
+      const t = text.match(/theta_ref\s*=?\s*([-\d.]+)/);
+      if (t) { const el = document.getElementById('btrimIn'); if (el && document.activeElement !== el) el.value = parseFloat(t[1]).toFixed(3); }
+    }
+
+    /* Angle-estimator filter weight: send the value and keep the box + hint in
+     * sync with the firmware's "estimator alpha=.. (tau=.. s ..)" reply. */
+    function applyAlpha() { send('alpha ' + document.getElementById('alphaIn').value); }
+    function syncAlpha(text) {
+      const m = text.match(/estimator alpha=([-\d.]+)/);
+      if (!m) return;
+      const el = document.getElementById('alphaIn');
+      if (el && document.activeElement !== el) el.value = parseFloat(m[1]).toFixed(3);
+      const tau = text.match(/tau=([-\d.]+)/);
+      const h = document.getElementById('alphaHint');
+      if (h && tau) h.textContent = `\u03c4 = ${tau[1]} s \u2014 higher \u03b1 trusts the gyro more (smoother, slower drift correction).`;
+    }
+
+    /* Gyro-bias calibration: fire the command and reflect the firmware's reply
+     * ("gyro calibration started..", "gyro bias set..", "gyro calib aborted..")
+     * in the hint next to the button. */
+    function gyrocal() { send('gyrocal'); }
+    function syncGyrocal(text) {
+      if (!/gyro (bias set|calib|calibration)/.test(text)) return;
+      const h = document.getElementById('gyrocalHint');
+      if (h) h.textContent = text;
+    }
+
     /* ---- tabs. Selecting Manual / Controller also puts the firmware in the
      * matching experiment mode so the panel's commands actually take effect. ---- */
-    const EXP_FOR_TAB = { manual: 'exp motors', ctrl: 'exp motor-ctrl' };
+    const EXP_FOR_TAB = { manual: 'exp motors', ctrl: 'exp motor-ctrl', angle: 'exp angles' };
+    const PANELS = ['manual', 'ctrl', 'angle', 'balance', 'flash'];
     function showTab(name) {
       document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
-      document.getElementById('panel-manual').classList.toggle('active', name === 'manual');
-      document.getElementById('panel-ctrl').classList.toggle('active', name === 'ctrl');
-      document.getElementById('panel-flash').classList.toggle('active', name === 'flash');
+      for (const p of PANELS) document.getElementById('panel-' + p).classList.toggle('active', name === p);
       localStorage.setItem('activeTab', name);
-      if (EXP_FOR_TAB[name] && ws && ws.readyState === WebSocket.OPEN) send(EXP_FOR_TAB[name]);
-      if (name === 'ctrl') scheduleDraw();
+      activeSrc = (name === 'angle') ? 'angles' : 'motors';
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        if (EXP_FOR_TAB[name]) {
+          send(EXP_FOR_TAB[name]);
+          if (name === 'angle') { send('est on'); send('alpha'); }   /* enable + fetch current alpha */
+        } else if (name === 'balance') {
+          /* Enter in a SAFE idle: estimation on (so pitch/attitude show) but the
+           * balance loop OFF so the motors don't move until the operator hits
+           * "Start balancing". Fetch the current gains/trim to fill the boxes. */
+          send('balance off');
+          send('est on');
+          send('bgains');
+        }
+      }
+      setPauseLabels();
+      if (name === 'ctrl' || name === 'angle' || name === 'balance') scheduleDraw();
     }
 
     function upload() {
@@ -855,11 +1172,11 @@
     (function initTab() {
       const name = localStorage.getItem('activeTab') || 'manual';
       document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
-      document.getElementById('panel-manual').classList.toggle('active', name === 'manual');
-      document.getElementById('panel-ctrl').classList.toggle('active', name === 'ctrl');
-      document.getElementById('panel-flash').classList.toggle('active', name === 'flash');
+      for (const p of PANELS) document.getElementById('panel-' + p).classList.toggle('active', name === p);
+      activeSrc = (name === 'angle') ? 'angles' : 'motors';
     })();
 
+    scheduleDraw();   /* paint empty charts / attitude placeholder before data arrives */
     connect();
   </script>
 </body>

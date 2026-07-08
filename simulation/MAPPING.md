@@ -15,11 +15,11 @@ re-run the helper at the bottom to regenerate them.
 |--------------|------|-----------------|------------|
 | `theta` (tilt) | rad | IMU pitch (accel + gyro) | `theta_deg = theta_rad * 180/pi` |
 | `omega` (tilt rate) | rad/s | gyro axis, `gx`/`gy`/`gz` | already in deg/s: `omega_dps = omega_rad * 180/pi` |
-| `pos` (cart) | m | encoders `posL`,`posR` | `pos_m = avg(posL,posR) / 6271.2` |
-| `vel` (cart) | m/s | encoders `velL`,`velR` | `vel_ms = avg(velL,velR) / 6271.2` |
+| `pos` (cart) | m | encoders `posL`,`posR` | `pos_m = avg(posL,posR) / 6464.1` |
+| `vel` (cart) | m/s | encoders `velL`,`velR` | `vel_ms = avg(velL,velR) / 6464.1` |
 
-Where **6271.2 counts/m** = `counts_per_wheel_rev / (2*pi*r_wheel)` =
-`1320 / (2*pi*0.0335)`. (One wheel revolution = 1320 counts = `2*pi*r` meters.)
+Where **6464.1 counts/m** = `counts_per_wheel_rev / (2*pi*r_wheel)` =
+`1320 / (2*pi*0.0325)`. (One wheel revolution = 1320 counts = `2*pi*r` meters.)
 
 Cart position/velocity use the **average** of the two wheels (the common,
 forward motion). The IMU gives the tilt; which gyro axis and which accel
@@ -42,14 +42,14 @@ The controllers output a **force F [N]**. The motor command is a duty in
 real-world compensations the sim showed were necessary:
 
 ```
-duty_raw = F / F_stall                       ; F_stall = 29.27 N (both motors, w=0)
-duty_ff  = duty_raw + (K_bemf * vel_ms)/F_stall   ; back-EMF feedforward, K_bemf=25.06 N/(m/s)
+duty_raw = F / F_stall                       ; F_stall = 30.17 N (both motors, w=0)
+duty_ff  = duty_raw + (K_bemf * vel_ms)/F_stall   ; back-EMF feedforward, K_bemf=26.62 N/(m/s)
 duty     = deadband_compensate(duty_ff)      ; remap [0,1] -> [deadband, 1]
 duty     = clamp(duty, -1, +1)
 ```
 
-- **F_stall = 29.27 N** is the force both motors make at zero speed; it is how
-  duty maps to force. (Top cart speed is `w_noload*r ~= 1.17 m/s`.)
+- **F_stall = 30.17 N** is the force both motors make at zero speed; it is how
+  duty maps to force. (Top cart speed is `w_noload*r ~= 1.13 m/s`.)
 - **Back-EMF feedforward** uses the encoder speed `vel_ms`; without it the cart
   is too sluggish to catch the body (this was what made `sim_discrete.m` topple
   until it was added).
@@ -67,16 +67,21 @@ If you compute the PID directly in **degrees / deg-per-second** and output
 
 | Gain | Sim value (N per rad) | Firmware value (duty per deg) |
 |------|----------------------|-------------------------------|
-| Kp | 45 | **0.02683** duty / deg |
-| Ki | 15 | **0.00894** duty / (deg*s) |
-| Kd | 5  | **0.00298** duty / (deg/s) |
+| Kp | 45 | **0.02603** duty / deg |
+| Ki | 15 | **0.00868** duty / (deg*s) |
+| Kd | 5  | **0.00289** duty / (deg/s) |
 
-Sanity check: a 5 deg tilt -> `0.02683*5 = 0.134` = ~13% duty, which matches the
+Sanity check: a 5 deg tilt -> `0.02603*5 = 0.130` = ~13% duty, which matches the
 duty trace in `sim_discrete.png`.
+
+> The SI PID gains `45/15/5` were hand-tuned against the *previous* (taller-body)
+> plant. With the corrected geometry the upright pole is ~2x faster (§ below), so
+> re-verify these in `sim_closedloop_pid.m` before relying on them - the firmware
+> conversion factors above are correct for whatever SI gains you settle on.
 
 ## 4. LQR gain (Step 7) in firmware units
 
-Sim LQR: `F = -K*x`, `K = [-10.00, -14.02, -96.03, -13.52]` for
+Sim LQR: `F = -K*x`, `K = [-10.00, -13.83, -93.50, -11.04]` for
 `x = [pos(m), vel(m/s), theta(rad), omega(rad/s)]`, `Q=diag([5 1 200 5])`,
 `R=0.05`.
 
@@ -88,12 +93,12 @@ duty = -( Kc*avg(posL,posR) + Kvc*avg(velL,velR) + Kth*theta_deg + Kom*omega_dps
 
 | Term | Multiplies | Firmware coefficient |
 |------|-----------|----------------------|
-| `Kc`  | encoder counts        | **5.447e-05** duty / count |
-| `Kvc` | encoder counts/s      | **7.635e-05** duty / (count/s) |
-| `Kth` | tilt [deg]            | **0.05725** duty / deg |
-| `Kom` | tilt rate [deg/s]     | **0.00806** duty / (deg/s) |
+| `Kc`  | encoder counts        | **5.127e-05** duty / count |
+| `Kvc` | encoder counts/s      | **7.091e-05** duty / (count/s) |
+| `Kth` | tilt [deg]            | **0.05408** duty / deg |
+| `Kom` | tilt rate [deg/s]     | **0.00639** duty / (deg/s) |
 
-(These already include the `-1/F_stall`, `1/6271.2`, and `pi/180` factors and the
+(These already include the `-1/F_stall`, `1/6464.1`, and `pi/180` factors and the
 sign of `u = -K*x`.) Still apply back-EMF feedforward + deadband compensation
 from section 2.
 

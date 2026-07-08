@@ -143,7 +143,29 @@ Start conservative and tune one wheel at a time:
    balance loop so the cascade does not fight itself.
 5. Repeat for the other wheel; the gains can differ slightly per motor.
 
-Seed constants (refine on hardware): `w_noload = 34.9 rad/s` (from the sim),
+### Default gains (in firmware)
+
+The values tuned on hardware and compiled in as the defaults
+([../../firmware/main/wheel_pi.c](../../firmware/main/wheel_pi.c),
+overridable live with `gains <l|r|both> <kp> <ki>`). The two motors differ, so
+the gains are **per wheel**:
+
+| Wheel | `Kp` | `Ki` | `Ti = Kp/Ki` | Feedforward `K` [rad/s per duty] |
+|-------|------|------|--------------|----------------------------------|
+| Left  | 0.1455 | 0.6737 | 0.216 s | 34.36 |
+| Right | 0.1554 | 0.8265 | 0.188 s | 32.18 |
+
+The integral time `Ti` sits on the order of the motor `tau` (~0.19 s), as the
+pole-zero cancellation in [pi-tuning.md](pi-tuning.md) predicts; the small
+per-wheel spread is the measured motor mismatch this loop exists to absorb. The
+feedforward `K` is each motor's identified steady-state gain
+([motor-identification.md](motor-identification.md)).
+
+Other compiled defaults (`wheel_pi.c`): measurement LPF `tau_f = 0.02 s`, output
+cap `±0.95`, integral clamp `±0.95`, brake cap `0.4`, deadband compensation
+**off** by default (neutral `0.02`, floor `0.10` when on), feedforward **on**.
+
+Seed constants (for reference): `w_noload = 34.9 rad/s` (from the sim),
 `deadband = 0.10` (measured on hardware, Phase 4 deadband sweep).
 
 ## Telemetry and test plan
@@ -162,4 +184,4 @@ Bring-up procedure (before any balance loop exists):
    whole point of the controller.
 4. Step the setpoint up/down and check tracking, overshoot, and that the
    integrator does not wind up at saturation.
-5. Record working gains back into this doc.
+5. Record working gains back into this doc (done - see *Default gains* above).

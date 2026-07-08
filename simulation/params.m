@@ -28,10 +28,11 @@ function p = params()
   p.g = 9.81;                 % gravity [m/s^2]
 
   % ---- Wheels (the "cart") -------------------------------------------
-  % GB37-520 with a typical ~67 mm diameter wheel. MEASURE your wheel.
-  p.r_wheel = 0.0335;         % wheel radius [m]
-  p.m_wheel = 0.060;          % mass of ONE wheel [kg]
+  % Measured: 65 mm diameter wheel (see docs/hardware/robot-mechanics.md).
+  p.r_wheel = 0.0325;         % wheel radius [m]  (65 mm diameter, measured)
+  p.m_wheel = 0.060;          % mass of ONE wheel [kg]  (ESTIMATE - measure)
   p.n_wheels = 2;             % two driven wheels
+  p.track    = 0.190;         % distance between the two wheels [m] (centre-to-centre, measured)
   % Solid-disk approximation for a wheel's rotational inertia, I = 1/2 m r^2.
   p.I_wheel = 0.5 * p.m_wheel * p.r_wheel^2;   % [kg*m^2]
 
@@ -45,9 +46,14 @@ function p = params()
   % total mass, the body height, and the height of the center of mass (CoM)
   % above the axle. These three set how fast the robot tips - shorter/lighter
   % is twitchier and harder to balance.
-  p.m_body      = 0.800;      % body mass [kg]
-  p.body_height = 0.300;      % overall body height [m] (~30 cm)
-  p.l           = 0.150;      % CoM height above the wheel axle [m] (~mid-body)
+  % Geometry from docs/hardware/robot-mechanics.md: overall height 120 mm with
+  % the axle at r = 32.5 mm, so the body extends ~87.5 mm above the axle.
+  p.m_body      = 0.800;      % body mass [kg]  (ESTIMATE - measure)
+  p.body_height = 0.0875;     % body extent above the axle [m] = H - r (120 - 32.5 mm)
+  p.l           = 0.050;      % CoM height above the wheel axle [m]
+                              % ESTIMATE (0 < l < body_height) - MEASURE via the
+                              % balance/swing test (robot-mechanics.md sec 6); this
+                              % is the single most sensitive balance parameter.
   % Body inertia about its OWN CoM, approximated as a uniform rod of height
   % body_height about its center:  I = (1/12) m H^2.
   p.I_body = (1/12) * p.m_body * p.body_height^2;   % [kg*m^2]
@@ -67,6 +73,14 @@ function p = params()
   p.motor.w_noload  = 333 * 2*pi/60;            % no-load output speed [rad/s]
   p.motor.deadband  = 0.10;                     % |u| below this -> no motion (measured, Phase 4 deadband sweep; both motors ~10%)
   p.motor.u_max     = 1.0;                       % PWM saturation (100% duty)
+  % Actuator lag. The torque-speed curve above is INSTANTANEOUS, but the real
+  % duty->wheel-speed response is first-order with tau ~ 0.19 s (measured in
+  % motor-identification.m; wheel_pi.c parks Ti = Kp/Ki there). That lag - rotor +
+  % gearbox + electrical dynamics the static curve omits - is what limits the
+  % inner-loop bandwidth on the robot, so model it explicitly:
+  %     u_eff_dot = (u_cmd - u_eff) / tau_e,   torque uses u_eff.
+  % Without it the sim inner loop is ~5x too fast and balance gains don't transfer.
+  p.motor.tau_e     = 0.19;                      % duty->speed time constant [s] (measured)
 
   % ---- Control loop ---------------------------------------------------
   p.f_ctrl  = 200;            % control rate [Hz]  (matches firmware CONTROL_HZ)

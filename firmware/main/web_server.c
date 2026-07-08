@@ -16,6 +16,8 @@
 #include "motors.h"
 #include "encoders.h"
 #include "wheel_pi.h"          /* wheel-speed controller: setpoint + gains */
+#include "balance_pid.h"       /* balance (tilt) controller: gains + trim */
+#include "estimator.h"         /* tilt estimator: alpha get/set */
 #include "control.h"           /* control_mode(): gate OTA on STOP_CONTROL */
 
 static const char *TAG = "web_server";
@@ -86,10 +88,11 @@ static void ws_reply(httpd_req_t *req, const char *text)
 /* Report the current experiment feature flags to the terminal. */
 static void reply_experiment(httpd_req_t *req)
 {
-    char msg[80];
-    snprintf(msg, sizeof(msg), "experiment: estimation %s, controller %s",
+    char msg[112];
+    snprintf(msg, sizeof(msg), "experiment: estimation %s, controller %s, balance %s",
              control_estimation_enabled() ? "ON" : "OFF",
-             control_controller_enabled() ? "ON" : "OFF");
+             control_controller_enabled() ? "ON" : "OFF",
+             control_balance_enabled()    ? "ON" : "OFF");
     ws_reply(req, msg);
 }
 
@@ -115,15 +118,20 @@ static void handle_command(httpd_req_t *req, const char *cmd)
             "dbcomp on|off                 - controller deadband compensation\\n"
             "ff on|off                     - controller feedforward (u=w_set/K)\\n"
             "control start|stop            - start/stop the control task\\n"
-            "exp motors|motor-ctrl|angles  - experiment preset\\n"
+            "exp motors|motor-ctrl|angles|balance - experiment preset\\n"
             "est on|off                    - angle estimation\\n"
+            "alpha <0..1>                  - tilt estimator filter weight\\n"
             "ctrl on|off                   - wheel-speed controller\\n"
+            "balance on|off                - self-balance loop (also enables est+ctrl)\\n"
+            "bgains <kp> <ki> <kd>         - set/report balance PID (bgains default resets)\\n"
+            "btrim <rad>                   - balance upright trim (theta_ref)\\n"
             "play | play stop              - run/stop uploaded motor script\\n"
             "deadband | deadband stop      - run/stop deadband sweep\\n"
+            "gyrocal                       - average gyro at rest, store zero-rate bias\\n"
             "enc reset                     - zero encoder counts\\n"
             "stream on|off                 - telemetry streaming\\n"
             "rollback                      - boot the previous OTA slot";
-        char buf[1400];
+        char buf[1800];
         snprintf(buf, sizeof(buf), "{\"type\":\"resp\",\"text\":\"%s\"}", help);
         ws_send_text(req, buf);
     } else if (strcmp(cmd, "exp motors") == 0) {
@@ -135,6 +143,9 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "exp angles") == 0) {
         control_set_experiment(TEST_ANGLES_ESTIMATION);
         reply_experiment(req);
+    } else if (strcmp(cmd, "exp balance") == 0) {
+        control_set_experiment(TEST_BALANCE);
+        reply_experiment(req);
     } else if (strcmp(cmd, "exp") == 0) {
         reply_experiment(req);
     } else if (strcmp(cmd, "est on") == 0) {
@@ -143,12 +154,69 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "est off") == 0) {
         control_set_estimation(false);
         reply_experiment(req);
+    } else if (strncmp(cmd, "alpha", 5) == 0) {
+        /* Tilt-estimator complementary-filter weight: "alpha 0.98" sets it,
+         * "alpha" alone reports. Higher alpha trusts the gyro more (less accel
+         * noise, slower drift correction). tau = alpha*dt/(1-alpha) at the tick. */
+        float a;
+        if (sscanf(cmd + 5, "%f", &a) == 1) {
+            estimator_set_alpha(a);
+        }
+        float cur = estimator_alpha();
+        float dt  = 1.0f / CONTROL_HZ;
+        float tau = (cur < 1.0f) ? cur * dt / (1.0f - cur) : 0.0f;
+        char msg[128];
+        snprintf(msg, sizeof(msg), "estimator alpha=%.4f (tau=%.3f s @ %d Hz)",
+                 (double)cur, (double)tau, CONTROL_HZ);
+        ws_reply(req, msg);
     } else if (strcmp(cmd, "ctrl on") == 0) {
         control_set_controller(true);
         reply_experiment(req);
     } else if (strcmp(cmd, "ctrl off") == 0) {
         control_set_controller(false);
         reply_experiment(req);
+    } else if (strcmp(cmd, "balance on") == 0) {
+        /* The outer balance loop needs the tilt estimate and the inner
+         * wheel-speed loop under it; turn both on so 'balance on' alone works. */
+        control_set_estimation(true);
+        control_set_controller(true);
+        control_set_balance(true);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "balance off") == 0) {
+        control_set_balance(false);
+        wheel_pi_set_setpoint(0, 0.0f);   /* drop the setpoint the balancer owned */
+        wheel_pi_set_setpoint(1, 0.0f);
+        reply_experiment(req);
+    } else if (strcmp(cmd, "balance") == 0) {
+        reply_experiment(req);
+    } else if (strncmp(cmd, "bgains", 6) == 0) {
+        /* Tune the balance PID live: "bgains <kp> <ki> <kd>", "bgains default"
+         * to restore the compiled seeds, or no args to report. */
+        char which[8] = { 0 };
+        float kp, ki, kd;
+        int n = sscanf(cmd + 6, "%7s", which);
+        if (n == 1 && (strcmp(which, "default") == 0 || strcmp(which, "reset") == 0)) {
+            balance_pid_reset_gains();
+        } else if (sscanf(cmd + 6, "%f %f %f", &kp, &ki, &kd) == 3) {
+            balance_pid_set_gains(kp, ki, kd);
+        }
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "balance PID: Kp=%.2f Ki=%.2f Kd=%.2f (theta_ref=%.3f rad)",
+                 (double)balance_pid_kp(), (double)balance_pid_ki(),
+                 (double)balance_pid_kd(), (double)balance_pid_setpoint());
+        ws_reply(req, msg);
+    } else if (strncmp(cmd, "btrim", 5) == 0) {
+        /* Upright trim: the tilt setpoint the balancer holds (rad). "btrim 0.01"
+         * leans it slightly; "btrim" reports the current value. */
+        float t;
+        if (sscanf(cmd + 5, "%f", &t) == 1) {
+            balance_pid_set_setpoint(t);
+        }
+        char msg[80];
+        snprintf(msg, sizeof(msg), "balance trim theta_ref = %.4f rad",
+                 (double)balance_pid_setpoint());
+        ws_reply(req, msg);
     } else if (strcmp(cmd, "deadband stop") == 0) {
         control_deadband_stop();
         ws_reply(req, "deadband sweep stopped, motors parked");
@@ -164,6 +232,17 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         control_deadband_start();
         ws_reply(req, "deadband sweep started: ramping 0->15% forward then reverse, "
                       "result follows in a few seconds...");
+    } else if (strcmp(cmd, "gyrocal") == 0) {
+        /* Average the gyro at rest and store the zero-rate bias. The IMU is only
+         * read while the control loop runs, so the task must be started; the
+         * robot must be held still (any orientation) for ~2 s. */
+        if (control_mode() != START_CONTROL) {
+            ws_reply(req, "gyrocal needs the control task running (send 'control start')");
+            return;
+        }
+        control_gyrocal_start();
+        ws_reply(req, "gyro calibration started: hold the robot still (~2 s), "
+                      "result follows...");
     } else if (strcmp(cmd, "play stop") == 0) {
         control_playback_stop();
         ws_reply(req, "playback stopped, motors parked");
@@ -329,11 +408,12 @@ static void handle_command(httpd_req_t *req, const char *cmd)
          * 'stats' shows both the loop numbers and what the loop is running. */
         if (n > 0 && n < (int)sizeof(json) && json[n - 1] == '}') {
             snprintf(json + n - 1, sizeof(json) - (n - 1),
-                     ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d,"
+                     ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d,\"bal\":%d,"
                      "\"play\":%d,\"play_pos\":%d,\"play_len\":%d}",
                      control_mode() == START_CONTROL ? "START_CONTROL" : "STOP_CONTROL",
                      control_estimation_enabled() ? 1 : 0,
                      control_controller_enabled() ? 1 : 0,
+                     control_balance_enabled() ? 1 : 0,
                      control_playback_active() ? 1 : 0,
                      control_playback_pos(), control_playback_len());
         }

@@ -14,6 +14,8 @@
 #include "motors.h"
 #include "encoders.h"
 #include "wheel_pi.h"
+#include "balance_pid.h"
+#include "estimator.h"
 #include "web_server.h"
 
 static const char *TAG = "control";
@@ -25,6 +27,9 @@ static const char *TAG = "control";
  * this many ticks (not a single tick): averaging cuts the count-quantization
  * noise a 1-tick difference shows at 200 Hz. Window spans VEL_WIN-1 intervals. */
 #define VEL_WIN        4
+
+/* Gyro is reported in deg/s; the balance loop wants the tilt rate in rad/s. */
+#define DEG2RAD        (float)(M_PI / 180.0)
 
 /* Scratch buffer for one packed telemetry frame. The largest topic (imu, 9
  * fields) is 4 + SAMPLES_PER_BATCH*(8 + 8*4) bytes (~4 KB at 100 samples, the
@@ -59,6 +64,7 @@ static volatile bool     s_stop_req;     /* ask the loop to exit at a safe point
  * off) is TEST_MOTORS: plain open-loop motor test, no estimation or controller. */
 static volatile bool     s_est_enabled;  /* run the orientation (roll/pitch) estimate */
 static volatile bool     s_ctrl_enabled; /* run the wheel/motor controller */
+static volatile bool     s_bal_enabled;  /* run the balance (tilt) outer loop */
 
 /* Scripted open-loop playback (TEST_MOTORS): a list of steps, each "hold (mL,mR)
  * for D seconds". The player starts its clock at 0 and applies each step in turn
@@ -93,6 +99,56 @@ static int64_t s_db_t0_us;               /* esp_timer time the current phase sta
 static int64_t s_db_start_cnt[2];        /* encoder counts at the phase start (per wheel) */
 static float   s_db_thresh[2][2];        /* latched threshold duty [wheel][0=fwd,1=rev] */
 static bool    s_db_found[2][2];         /* whether that wheel/direction has tripped yet */
+
+/* Gyro-bias calibration (any experiment): average the gyro over a fixed window
+ * while the robot is held still and fold the mean into the IMU's stored bias, so
+ * the estimator integrates a zero-rate gyro (docs/theory/angle-estimation.md).
+ * Mirrors the deadband sweep: a web command arms it, the control loop runs it
+ * over GYROCAL_N ticks, and the reporter emits the result off the real-time
+ * path. Runs in whatever pose the robot is held in - gyro bias is orientation-
+ * independent - but it must be motionless; a per-axis spread guard flags motion. */
+#define GYROCAL_N        400      /* samples to average (~2 s at 200 Hz) */
+#define GYROCAL_MOVE_DPS 2.0f     /* per-axis min..max spread that flags "it moved" */
+static volatile bool s_gc_active;        /* calibration running */
+static volatile bool s_gc_report;        /* finished: reporter should emit the result */
+static int    s_gc_n;                    /* samples accumulated so far */
+static double s_gc_sum[3];               /* running sum of the (corrected) gyro */
+static float  s_gc_min[3], s_gc_max[3];  /* per-axis extremes, for the motion guard */
+static float  s_gc_bias[3];              /* resulting absolute bias, dps (for the report) */
+static bool   s_gc_moved;                /* spread exceeded the still threshold */
+
+/* Accumulate one gyro sample into the calibration window and, on the last one,
+ * compute the mean and fold it into the stored bias (unless the robot moved).
+ * The gyro is already bias-corrected on read, so the mean is the residual to add
+ * to the existing bias - so re-running the command refines rather than resets. */
+static void gyrocal_step(imu_t imu)
+{
+    if (!imu.ok) return;   /* skip a bad read; do not advance the counter */
+    float g[3] = { imu.gx, imu.gy, imu.gz };
+    if (s_gc_n == 0) {
+        for (int i = 0; i < 3; i++) { s_gc_sum[i] = 0.0; s_gc_min[i] = s_gc_max[i] = g[i]; }
+    }
+    for (int i = 0; i < 3; i++) {
+        s_gc_sum[i] += g[i];
+        if (g[i] < s_gc_min[i]) s_gc_min[i] = g[i];
+        if (g[i] > s_gc_max[i]) s_gc_max[i] = g[i];
+    }
+    if (++s_gc_n < GYROCAL_N) return;
+
+    float b[3];
+    imu_get_gyro_bias(&b[0], &b[1], &b[2]);
+    s_gc_moved = false;
+    for (int i = 0; i < 3; i++) {
+        s_gc_bias[i] = b[i] + (float)(s_gc_sum[i] / s_gc_n);
+        if (s_gc_max[i] - s_gc_min[i] > GYROCAL_MOVE_DPS) s_gc_moved = true;
+    }
+    if (!s_gc_moved) {
+        imu_set_gyro_bias(s_gc_bias[0], s_gc_bias[1], s_gc_bias[2]);
+        estimator_reset();     /* re-seed the tilt so it converges with the debiased gyro */
+    }
+    s_gc_active = false;
+    s_gc_report = true;
+}
 
 /* ISR context: keep it minimal - just wake the control task for the next tick. */
 static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
@@ -230,6 +286,7 @@ static void control_task(void *arg)
     int64_t last_us = esp_timer_get_time();   /* timestamp of the previous tick */
     bool    primed = false;        /* skip the warning check on the first tick */
     bool    ctrl_was = false;      /* previous tick's controller-enabled state */
+    bool    bal_was  = false;      /* previous tick's balance-enabled state */
     int     active = 0;            /* buffer we are currently writing into */
     int     idx = 0;               /* next slot in the active buffer */
 
@@ -256,12 +313,20 @@ static void control_task(void *arg)
          * only, and the per-tick dt check above flags it if jitter creeps in. */
         imu = mpu6050_read();
 
-        /* Orientation estimate (roll/pitch, rad). Gated by the estimation flag
-         * so it can be A/B tested in isolation; when off the angles topic stays
-         * empty (NaN). */
+        /* Gyro-bias calibration, when armed: accumulate the gyro at rest and, on
+         * the last sample, store the mean as the zero-rate bias. Runs before the
+         * estimator so a completing calibration re-seeds it the same tick. */
+        if (s_gc_active) gyrocal_step(imu);
+
+        /* Orientation estimate (roll/pitch, rad) from the complementary filter in
+         * estimator.c. Gated by the estimation flag so it can be A/B tested; when
+         * off the angles topic stays empty (NaN) and the filter is re-seeded on
+         * the next enable. */
         float roll = NAN, pitch = NAN;
-        if (s_est_enabled) {
-            /* TODO: complementary / Kalman filter from imu -> roll, pitch. */
+        if (!s_est_enabled) {
+            estimator_reset();
+        } else {
+            estimator_update(imu, dt_us * 1e-6f, &roll, &pitch);
         }
 
         /* Wheel angular speed (rad/s), computed before the command decision so
@@ -300,15 +365,46 @@ static void control_task(void *arg)
             /* Rising edge into closed loop: clear the integrators/filters so the
              * loop starts from a clean slate rather than a stale wound-up state. */
             if (!ctrl_was) wheel_pi_reset();
-            /* Per-wheel PI + deadband + anti-windup -> duty. dt is the measured
-             * tick period so gains stay correct under jitter. */
             float dt = (dt_us > 0) ? (float)dt_us * 1e-6f : (1.0f / (float)CONTROL_HZ);
-            wsetL = wheel_pi_setpoint(0);
-            wsetR = wheel_pi_setpoint(1);
-            cmdL = wheel_pi_step(0, velL, dt);
-            cmdR = wheel_pi_step(1, velR, dt);
-            uL = wheel_pi_raw(0);
-            uR = wheel_pi_raw(1);
+
+            /* Balance (outer) loop: turn the estimated tilt into a common
+             * wheel-speed setpoint that both inner loops track. It needs a valid
+             * tilt estimate; if the robot has fallen past BALANCE_MAX_TILT the
+             * small-angle "catch it" strategy cannot recover, so cut the motors
+             * rather than command a doomed full-speed lunge. */
+            bool balance_cut = false;
+            if (s_bal_enabled) {
+                if (!bal_was) balance_pid_reset();
+                bool have_theta = s_est_enabled && isfinite(pitch);
+                if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
+                    float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
+                    float w_common  = balance_pid_step(pitch, theta_dot, dt);
+                    wheel_pi_set_setpoint(0, w_common);
+                    wheel_pi_set_setpoint(1, w_common);
+                } else {
+                    balance_pid_reset();
+                    wheel_pi_reset();
+                    wheel_pi_set_setpoint(0, 0.0f);
+                    wheel_pi_set_setpoint(1, 0.0f);
+                    balance_cut = true;
+                }
+            }
+
+            if (balance_cut) {
+                cmdL = 0.0f;
+                cmdR = 0.0f;
+            } else {
+                /* Per-wheel PI + deadband + anti-windup -> duty. dt is the
+                 * measured tick period so gains stay correct under jitter. With
+                 * balancing on, the setpoints were just written by the outer
+                 * loop; otherwise they come from the 'speed' command. */
+                wsetL = wheel_pi_setpoint(0);
+                wsetR = wheel_pi_setpoint(1);
+                cmdL = wheel_pi_step(0, velL, dt);
+                cmdR = wheel_pi_step(1, velR, dt);
+                uL = wheel_pi_raw(0);
+                uR = wheel_pi_raw(1);
+            }
         } else if (s_db_active) {
             /* Deadband sweep takes priority over playback/manual while running. */
             deadband_step(now_us, &cmdL, &cmdR);
@@ -337,6 +433,7 @@ static void control_task(void *arg)
         motor_set(0, cmdL);
         motor_set(1, cmdR);
         ctrl_was = s_ctrl_enabled;
+        bal_was  = s_bal_enabled;
 
         /* Record this tick. Wheel angle (rad) is the continuous double-precision
          * count; the per-tick speeds were computed above (reused here so the
@@ -449,6 +546,31 @@ static void emit_playback_result(void)
     ws_broadcast(json);
 }
 
+/* Announce the gyro-bias calibration result once the control loop finishes one,
+ * off the real-time path. On detected motion the bias is left unchanged and the
+ * operator is told to retry while holding the robot still. */
+static void emit_gyrocal_result(void)
+{
+    if (!s_gc_report) return;
+    s_gc_report = false;
+
+    char msg[192];
+    if (s_gc_moved) {
+        snprintf(msg, sizeof(msg),
+                 "gyro calib aborted: motion detected (spread > %.1f dps) - "
+                 "hold the robot still and retry", (double)GYROCAL_MOVE_DPS);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "gyro bias set: gx=%.3f gy=%.3f gz=%.3f dps (avg of %d samples)",
+                 (double)s_gc_bias[0], (double)s_gc_bias[1], (double)s_gc_bias[2],
+                 GYROCAL_N);
+    }
+    ESP_LOGI(TAG, "%s", msg);
+    char json[256];
+    snprintf(json, sizeof(json), "{\"type\":\"resp\",\"text\":\"%s\"}", msg);
+    ws_broadcast(json);
+}
+
 /* Runs on core 0. Blocks until the control task hands over a full buffer, then:
  * emits any pending timing warning, caches the latest sample for the web
  * server, and streams the whole batch to connected clients to be saved. */
@@ -471,6 +593,9 @@ static void reporter_task(void *arg)
 
         /* Announce when a playback script has run to completion. */
         emit_playback_result();
+
+        /* Announce the gyro-bias calibration result when the loop finishes one. */
+        emit_gyrocal_result();
 
         /* Pack one binary frame per telemetry topic and stream it to any
          * connected WebSocket clients so the page can record each to its own
@@ -537,10 +662,11 @@ void control_set_mode(control_mode_t mode)
 void control_set_experiment(experiment_mode_t mode)
 {
     switch (mode) {
-        case TEST_MOTOR_CONTROLLERS: s_est_enabled = false; s_ctrl_enabled = true;  break;
-        case TEST_ANGLES_ESTIMATION: s_est_enabled = true;  s_ctrl_enabled = false; break;
+        case TEST_MOTOR_CONTROLLERS: s_est_enabled = false; s_ctrl_enabled = true;  s_bal_enabled = false; break;
+        case TEST_ANGLES_ESTIMATION: s_est_enabled = true;  s_ctrl_enabled = false; s_bal_enabled = false; break;
+        case TEST_BALANCE:           s_est_enabled = true;  s_ctrl_enabled = true;  s_bal_enabled = true;  break;
         case TEST_MOTORS:
-        default:                     s_est_enabled = false; s_ctrl_enabled = false; break;
+        default:                     s_est_enabled = false; s_ctrl_enabled = false; s_bal_enabled = false; break;
     }
 }
 
@@ -548,6 +674,8 @@ bool control_estimation_enabled(void) { return s_est_enabled; }
 void control_set_estimation(bool on)  { s_est_enabled = on; }
 bool control_controller_enabled(void) { return s_ctrl_enabled; }
 void control_set_controller(bool on)  { s_ctrl_enabled = on; }
+bool control_balance_enabled(void)    { return s_bal_enabled; }
+void control_set_balance(bool on)     { s_bal_enabled = on; }
 
 void control_playback_begin(void)
 {
@@ -614,3 +742,13 @@ void control_deadband_stop(void)
 }
 
 bool control_deadband_active(void) { return s_db_active; }
+
+void control_gyrocal_start(void)
+{
+    s_gc_n      = 0;
+    s_gc_moved  = false;
+    s_gc_report = false;
+    s_gc_active = true;                /* publish last so the loop sees a ready state */
+}
+
+bool control_gyrocal_active(void) { return s_gc_active; }
