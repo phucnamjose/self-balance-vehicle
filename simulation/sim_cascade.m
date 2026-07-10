@@ -1,42 +1,14 @@
-% SIM_CASCADE  The firmware's cascade, in simulation: balance PID -> wheel-speed
-%              PI -> motor -> plant. NO direct force control.
-%
-% sim_discrete.m (Step 6) closes the balance loop by computing a cart FORCE and
-% turning it into a duty (F/F_stall + back-EMF feedforward). The firmware does
-% NOT work that way: the balance loop outputs a common WHEEL-SPEED command
-% w_common, and an inner per-wheel PI turns that into duty (the cascade in
-% docs/theory/README.md). This script mirrors that exact structure so gains can
-% be tuned in the units the firmware actually uses:
-%
-%   pitch estimate  --> balance_pid_sim --> w_common --> wheel_pi_sim --> duty
-%        ^                (outer loop)                     (inner loop)     |
-%        |                                                                  v
-%        +----------------------- complementary filter <-- IMU <-- PLANT <-+
-%
-% The two controllers are the SAME code the firmware runs
-% (balance_pid_sim.m / wheel_pi_sim.m are line-for-line ports of
-% balance_pid.c / wheel_pi.c), so tuning here transfers directly.
-%
-% Simplifications (documented, to be lifted later):
-%   * ONE lumped inner loop (the plant is a single symmetric cart), not two.
-%   * Wheel speed = v/r (ground-relative); the -omega body-rotation term the real
-%     encoder sees is neglected, matching the existing motor model in
-%     sim_discrete.m.
-%   * The sim motor is an ideal first-order torque-speed curve, so its speed
-%     response (tau_w ~ 37 ms below) is faster than the real motor (~190 ms from
-%     motor-identification.md). The inner gains here are therefore tuned to the
-%     SIM motor; on hardware use the firmware wheel_pi defaults.
+% SIM_CASCADE  Firmware cascade: balance PID -> wheel PI -> motor -> plant.
+% Ports balance_pid_sim / wheel_pi_sim (not direct force like sim_discrete.m).
+% Simplifications: one lumped inner loop; w=v/r (no body-rotation term).
 
 clear; clc;
 here = fileparts(mfilename('fullpath'));
 addpath(here);                 % params, plant_dynamics, wheel_pi_sim, balance_pid_sim
 p = params();
 
-% ---- Inner wheel-speed loop: the ACTUAL firmware wheel_pi gains -----------------
-% The sim motor now carries the real actuator lag (p.motor.tau_e), so the inner
-% loop must be the firmware's, not an idealized IMC design - otherwise the sim
-% inner loop is ~5x too fast and balance gains won't transfer. These are the
-% lumped average of the per-wheel gains in firmware/main/wheel_pi.c.
+% ---- Inner loop: firmware wheel_pi gains (lumped avg) --------------------
+% With p.motor.tau_e the inner loop must match firmware, not ideal IMC.
 inner.kp        = 0.150;                      % avg(0.1455, 0.1554)
 inner.ki        = 0.750;                      % avg(0.6737, 0.8265)
 inner.kff       = 33.3;                       % avg(34.36, 32.18)  [rad/s per duty]
@@ -50,14 +22,9 @@ inner.neutral   = 0.02;                       % WHEEL_PI_NEUTRAL
 inner.db_floor  = p.motor.deadband;           % WHEEL_PI_DB_FLOOR
 Kw = p.motor.w_noload;
 
-% ---- Outer balance loop -------------------------------------------------------
-% In THIS cascade the gain roles rotate (see the note at the bottom of the file):
-% Ki is the restoring STIFFNESS (needs r*Ki > g, i.e. Ki > g/r ~= 302), Kp is
-% DAMPING, Kd adds effective inertia (slows the loop so the motor lag hurts less).
-% With the REALISTIC motor lag (p.motor.tau_e) + the firmware inner loop, the loop
-% needs a lot of damping: tune_cascade.m lands around Kp~60 Ki~500 Kd~8. (The
-% ideal-motor optimum Kp=18 Ki=750 Kd=0 limit-cycles / falls once the lag is in -
-% exactly what the robot does.)
+% ---- Outer balance loop -------------------------------------------------
+% Velocity cascade: Ki=stiffness (need r*Ki>g, Ki>~302), Kp=damping, Kd=inertia.
+% With tau_e + firmware inner loop, tune_cascade.m lands ~Kp60 Ki500 Kd8.
 outer.kp        = 60.0;
 outer.ki        = 500.0;
 outer.kd        = 8.0;
@@ -66,7 +33,7 @@ outer.w_max     = 30.0;                       % BALANCE_W_MAX
 outer.i_max     = 30.0;                       % BALANCE_I_MAX
 BAL_MAX_TILT    = 0.6;                        % BALANCE_MAX_TILT (fall cutoff, rad)
 
-% ---- Estimator (complementary) + sensor model (as in sim_discrete.m) ----------
+% ---- Estimator + sensor model -------------------------------------------
 alpha       = 0.98;                           % firmware COMP_ALPHA_DEFAULT
 gyro_bias   = deg2rad(0.1);
 gyro_noise  = deg2rad(1.0);
@@ -86,9 +53,7 @@ wp_i      = 0;                                % inner integrator
 wp_wf     = x(2) / p.r_wheel;                 % inner measurement filter (seed at truth)
 u_eff     = 0;                                % actuator-lag state (effective duty)
 
-% Lumped loop DEAD TIME (pure transport delay): IMU sample + I2C read + estimator
-% + control compute + PWM update + driver. Distinct from the motor's first-order
-% lag (tau_e) - a pure delay is far more destabilizing. Set 0 to disable.
+% Lumped loop dead time [s] (IMU + compute + PWM); distinct from tau_e. 0=off.
 loop_delay = 0.015;                           % [s]  (~3 ticks at 200 Hz)
 n_delay    = max(0, round(loop_delay / dt_ctrl));
 duty_q     = zeros(1, n_delay + 1);           % FIFO of pending duty commands
@@ -124,15 +89,15 @@ for n = 1:Nticks
     w_common = 0; duty = 0; bal_i = 0; wp_i = 0; wp_wf = w_meas;
   end
 
-  % ===== TRANSPORT DELAY: the duty computed now is applied n_delay ticks later ==
+  % ===== TRANSPORT DELAY =====
   duty_q   = [duty_q(2:end), duty];
   duty_app = duty_q(1);
 
-  % ===== ACTUATE + PLANT: hold duty over the tick (ZOH); motor lag on u_eff =====
+  % ===== ACTUATE + PLANT (ZOH duty, first-order u_eff lag) =====
   for s = 1:n_sub
     u_eff   = u_eff + (dt_sub / p.motor.tau_e) * (duty_app - u_eff);   % first-order actuator lag
     u_m     = u_eff;
-    if abs(u_m) < p.motor.deadband, u_m = 0.0; end   % motor dead zone: no drive torque below ~10% duty
+    if abs(u_m) < p.motor.deadband, u_m = 0.0; end   % dead zone
     w_wheel = x(2) / p.r_wheel;
     tau     = u_m*p.motor.tau_stall - (p.motor.tau_stall/p.motor.w_noload)*w_wheel;
     F       = p.n_wheels * tau / p.r_wheel;
@@ -199,23 +164,5 @@ outfile = fullfile(here, 'sim_cascade.png');
 print(fig, '-dpng', '-r100', outfile);
 printf('Saved plot -> %s\n', outfile);
 
-% ------------------------------------------------------------------------------
-% WHY THE GAIN ROLES ROTATE (velocity-command balancing)
-%
-% With a wheel-SPEED inner loop the base linear acceleration is the derivative of
-% our command:  a = r * d(w_common)/dt.  With w_common = Kp*th + Ki*Int(th) + Kd*th_dot,
-%
-%     a = r*(Kp*th_dot + Ki*th + Kd*th_ddot).
-%
-% Small-angle pendulum  L*th_ddot = g*th - a  gives
-%
-%     (L + r*Kd)*th_ddot + r*Kp*th_dot + (r*Ki - g)*th = 0.
-%
-% All coefficients must share a sign, so:
-%   * Ki gives the RESTORING STIFFNESS and MUST satisfy  r*Ki > g  =>  Ki > g/r (~302).
-%   * Kp gives DAMPING (the th_dot term).
-%   * Kd adds EFFECTIVE INERTIA.
-% This is the opposite of force-based PID intuition, and is the key thing the
-% cascade restructure makes visible. Tilt-only still drifts (no r*Ki-g "spring"
-% on POSITION) - a velocity/position outer loop is the next layer.
-% ------------------------------------------------------------------------------
+% Velocity-command cascade: a=r*d(w_common)/dt => Ki=stiffness, Kp=damping, Kd=inertia.
+% Opposite of force-PID intuition; tilt-only still drifts (no position spring).

@@ -2,12 +2,9 @@
  * @file telemetry.h
  * @brief Shared loop-state types and the cached snapshot used by the web server.
  *
- * The control loop writes one sample_t every tick into a double buffer and
- * checks each tick's measured period against the limits below, flagging a
- * warning if it runs long or short. After SAMPLES_PER_BATCH samples (0.5 s) it
- * swaps buffers and hands the full one to the reporter task, which emits any
- * pending timing warning, caches the latest sample for HTTP/WebSocket readers,
- * and streams the whole batch to the browser to be saved as a file.
+ * The control loop writes one sample_t per tick into a double buffer; after
+ * SAMPLES_PER_BATCH samples (0.2 s) it hands the full buffer to the reporter,
+ * which caches the latest sample and streams the batch to the browser.
  */
 #pragma once
 
@@ -15,19 +12,27 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Control loop rate (Hz). Shared because telemetry tags each frame with it. */
-#define CONTROL_HZ     200
+/* Control loop rate (Hz), shared so telemetry can tag each frame. 500 Hz keeps
+ * sampling/ZOH dead time low for the balance limiter; the IMU DLPF and the
+ * read->compute->PWM path now dominate latency. Rate-dependent constants
+ * (COMP_ALPHA_DEFAULT, VEL_WIN) are preserved in time when this changes. */
+#define CONTROL_HZ     500
 
-/* Nominal loop period and how many samples make up one reported batch. At
- * 200 Hz a half-second batch is 100 samples. */
+/* Loop period and batch size, derived from the rate so a batch is always 200 ms. */
 #define CONTROL_PERIOD_US   (1000000 / CONTROL_HZ)
-#define SAMPLES_PER_BATCH   (CONTROL_HZ / 2)
+#define SAMPLES_PER_BATCH   (CONTROL_HZ / 5)
 
-/* Timing limits for the warning job (tunable). The control loop warns when a
- * tick's measured period runs longer than DT_MAX_WARN_US or shorter than
- * DT_MIN_WARN_US. */
-#define DT_MAX_WARN_US (CONTROL_PERIOD_US * 7 / 5)                   /* +40% */
-#define DT_MIN_WARN_US (CONTROL_PERIOD_US * 3 / 5)                   /* -40% */
+/* Period warning band, an ABSOLUTE margin (not a % of the period): jitter sources
+ * are absolute in time (scheduler wake, a ~1 ms I2C stall) and don't scale with
+ * the rate. DT_JITTER_MARGIN_US covers one catch-up after a slow tick; at 500 Hz
+ * this gives a 1.0..3.0 ms window. */
+#define DT_JITTER_MARGIN_US 1000
+#define DT_MAX_WARN_US (CONTROL_PERIOD_US + DT_JITTER_MARGIN_US)
+#define DT_MIN_WARN_US (CONTROL_PERIOD_US - DT_JITTER_MARGIN_US)
+
+/* Compute-budget limit: how long the tick's WORK takes (vs the period above). Warn
+ * once it exceeds 90% of the period (1.8 ms at 500 Hz), or the next tick starts late. */
+#define RUN_WARN_US    (CONTROL_PERIOD_US * 9 / 10)                  /* 90% */
 
 /* One IMU sample in physical units. */
 typedef struct {
@@ -55,24 +60,18 @@ void telemetry_init(void);
 /* Replace the cached latest sample (called by the reporter task). */
 void telemetry_set_latest(const sample_t *s);
 
-/* Serialize the cached latest sample to JSON. @p type tags the message so the
- * client can tell telemetry from command replies. Returns the string length. */
+/* Serialize the cached latest sample to JSON. @p type tags the message (telemetry
+ * vs command reply). Returns the string length. */
 int telemetry_latest_json(char *buf, size_t len, const char *type);
 
-/* Telemetry is split into named topics (imu / angles / motors), each a
- * projection of sample_t with its own column set. The reporter streams one
- * frame per topic so the client can record each to its own file. */
+/* Telemetry is split into named topics (imu / angles / motors), each a projection
+ * of sample_t with its own column set, streamed as one frame per topic. */
 int         telemetry_topic_count(void);
 const char *telemetry_topic_name(int topic);
 
-/* Pack @p n samples of topic @p topic into @p buf as a compact binary frame
- * (sent as a WebSocket binary message):
- *
- *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
- *   then, per sample: uint64 t_us, followed by (field_count-1) float32 values
- *
- * Column order/units are documented next to each topic's packer in telemetry.c
- * and mirrored on the client. Not-yet-available fields are packed as NaN.
- * Returns the byte length, or a negative value if it would not fit. */
+/* Pack @p n samples of @p topic into @p buf as a little-endian binary frame:
+ *   [u8 topic_id][u8 field_count][u16 sample_count] then per-sample u64 t_us +
+ *   (field_count-1) float32. Column order matches telemetry.c and the client.
+ * Returns the byte length, or negative if it would not fit. */
 int telemetry_topic_pack(uint8_t *buf, size_t len, int topic,
                          const sample_t *samples, int n);

@@ -31,10 +31,9 @@ static const char *TAG = "imu";
 #define MPU_ACCEL_LSB_PER_G    16384.0f
 #define MPU_GYRO_LSB_PER_DPS   131.0f
 
-/* Per-read I2C timeout. A normal read is ~0.4 ms; this is ~10x that but still
- * under one 5 ms control tick, so a bus glitch costs ~1 missed tick instead of
- * stalling the control loop for 100 ms. */
-#define MPU_I2C_TIMEOUT_MS     4
+/* Per-read I2C timeout. Well under one 2 ms tick so a bus glitch fails fast (caller
+ * holds the last sample) and costs one stale sample rather than a missed tick. */
+#define MPU_I2C_TIMEOUT_MS     1
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mpu;       /* MPU6050 device on the I2C bus */

@@ -9,9 +9,8 @@
 
 #include <stdint.h>
 
-/* GB37-520 with 4x quadrature decoding: 11 PPR * 30:1 gearbox * 4 = 1320 counts
- * per full wheel (output-shaft) revolution. This is the number that maps raw
- * counts to physical angle/distance. */
+/* GB37-520, 4x quadrature: 11 PPR * 30:1 gearbox * 4 = 1320 counts per wheel
+ * (output-shaft) revolution - maps raw counts to physical angle/distance. */
 #define ENC_COUNTS_PER_WHEEL_REV   1320
 
 /* Configure both PCNT units for 4x quadrature decoding. Call once at boot. */

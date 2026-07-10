@@ -1,17 +1,6 @@
 % ANGLE_ESTIMATION_PLOTS  Figures for docs/theory/angle-estimation.md.
-%
-% Illustrates how the body tilt angle theta is estimated by fusing the two
-% imperfect IMU signals (accelerometer angle + gyro rate). Base Octave only
-% (no toolboxes): every transfer function is evaluated on a grid by hand and
-% the filters are run as plain difference equations.
-%
-% Generates five PNGs into docs/theory/ (referenced by angle-estimation.md):
-%   angle-est-geometry.png     - accelerometer tilt geometry (gravity projection)
-%   angle-est-sensors.png      - the two failure modes: accel noise/spikes, gyro drift
-%   angle-est-comp-bode.png    - complementary filter: LP(accel)+HP(gyro) = 1
-%   angle-est-fusion.png       - fused estimate vs accel-only / gyro-only / truth
-%   angle-est-kalman.png       - Kalman filter: tracks theta AND learns the gyro bias
-%
+% IMU fusion (accel + gyro); base Octave only (hand-evaluated TFs, difference equations).
+% Outputs: angle-est-geometry/sensors/comp-bode/fusion/kalman.png -> docs/theory/
 % Run:  cd experiments/angle_estimation && octave --eval angle_estimation_plots
 
 function angle_estimation_plots()
@@ -22,10 +11,10 @@ function angle_estimation_plots()
   graphics_toolkit('gnuplot');
 
   % ---- shared colours -----------------------------------------------------
-  col_true = [0.15 0.15 0.15];       % truth (near-black)
-  col_acc  = [0.85 0.33 0.10];       % accelerometer (orange)
-  col_gyro = [0.20 0.55 0.20];       % gyroscope (green)
-  col_fuse = [0.00 0.45 0.74];       % fused estimate (blue)
+  col_true = [0.15 0.15 0.15];
+  col_acc  = [0.85 0.33 0.10];
+  col_gyro = [0.20 0.55 0.20];
+  col_fuse = [0.00 0.45 0.74];
   col_grey = [0.55 0.55 0.55];
 
   dt = 1/200;                         % 200 Hz control tick (firmware CONTROL_HZ)
@@ -33,51 +22,41 @@ function angle_estimation_plots()
   % ======================================================================
   % Fig 1: accelerometer tilt geometry
   % ======================================================================
-  % A body tilted by theta about the wheel axle. At rest the accelerometer
-  % measures the SPECIFIC FORCE, which points opposite gravity (+g "up"). In the
-  % body frame its components are a_z = g cos(theta), a_x = g sin(theta), so
-  % theta = atan2(a_x, a_z).
-  th = deg2rad(28);                   % draw a 28 deg tilt for clarity
+  % Specific force opposite gravity: a_z = g cos(theta), a_x = g sin(theta) -> atan2(a_x, a_z)
+  th = deg2rad(28);
   R  = [cos(th) -sin(th); sin(th) cos(th)];
   L  = 1.0;                            % accel vector length (= 1 g)
 
   fig = figure('visible','off','position',[100 100 760 680]);
   hold on; axis equal; axis off;
 
-  % ground + pivot
   plot([-1.7 1.7], [0 0], 'color', col_grey, 'linewidth', 1.5);
   plot(0, 0, 'k.', 'markersize', 16);
   text(1.42, -0.12, 'ground');
 
-  % body: a slab from the pivot up, rotated by theta
   body = [ -0.16 -0.16 0.16 0.16; 0 1.3 1.3 0 ];
   b = R*body;
   patch(b(1,:), b(2,:), [0.90 0.92 0.98], 'edgecolor', col_true, 'linewidth', 1.5);
 
-  % vertical (upright) reference through the pivot
   plot([0 0], [0 1.45], '--', 'color', col_grey, 'linewidth', 1.2);
   text(-0.28, 1.45, 'upright (z_{world})');
 
-  % CoM / IMU location
   com = R*[0; 0.72];
   plot(com(1), com(2), 'k.', 'markersize', 15);
   text(com(1)-0.52, com(2)-0.02, 'CoM / IMU');
 
-  % body axes at the CoM: z_b up along the slab, x_b across it
   zb = R*[0; 1];  xb = R*[1; 0];
   arrow(com, com + 0.9*L*zb, col_grey, 1.5);
   arrow(com, com + 0.55*L*xb, col_grey, 1.5);
   text_at(com + 0.95*L*zb, 'z_b', col_grey);
   text_at(com + 0.60*L*xb, 'x_b', col_grey);
 
-  % measured specific force a: points straight UP (world), magnitude 1 g
   tip = com + [0; L];
   arrow(com, tip, col_acc, 2.5);
   text(tip(1)+0.03, tip(2)+0.02, 'a  (accel reads +1g, opposite gravity)');
 
-  % projections of a onto the body axes -> the two measured components
-  az = (L*zb'*[0;1]) * zb;            % component along z_b
-  ax = (L*xb'*[0;1]) * xb;            % component along x_b
+  az = (L*zb'*[0;1]) * zb;
+  ax = (L*xb'*[0;1]) * xb;
   plot([com(1)+az(1) tip(1)], [com(2)+az(2) tip(2)], ':', 'color', col_fuse, 'linewidth', 1.3);
   plot([com(1)+ax(1) tip(1)], [com(2)+ax(2) tip(2)], ':', 'color', col_fuse, 'linewidth', 1.3);
   arrow(com, com + az, col_fuse, 2);
@@ -85,7 +64,6 @@ function angle_estimation_plots()
   text_at(com + 0.5*az + [-0.16;0.02], 'a_z = g cos\theta', col_fuse);
   text_at(com + 0.5*ax + [0.02;-0.12], 'a_x = g sin\theta', col_fuse);
 
-  % theta arc between a (world up) and z_b (body up)
   aa = linspace(pi/2, pi/2 - th, 40);
   rr = 0.45;
   plot(com(1)+rr*cos(aa), com(2)+rr*sin(aa), 'k', 'linewidth', 1.2);
@@ -101,23 +79,19 @@ function angle_estimation_plots()
   T = 12; t = 0:dt:T; N = numel(t);
   randn('seed', 7);
 
-  % true tilt: a smooth, realistic balancing wobble (a few small sinusoids)
   theta_true = 3*sin(2*pi*0.25*t) + 1.5*sin(2*pi*0.6*t + 1.0);
   omega_true = gradient(theta_true, dt);           % true tilt rate [deg/s]
 
-  % --- gyro: clean rate, but a constant BIAS + a little noise -------------
+  % gyro: bias + noise
   gyro_bias  = 1.2;                                % deg/s residual bias
   gyro_noise = 0.30;                               % deg/s
   gyro_meas  = omega_true + gyro_bias + gyro_noise*randn(1,N);
 
-  % --- accel angle: no drift, but NOISY and corrupted by body linear accel.
-  % A horizontal shove at t~4 s makes the accelerometer briefly report a large
-  % false tilt (it cannot tell gravity from acceleration). The gyro is immune.
+  % accel: noisy; t~4 s shove adds false tilt (cannot separate gravity from linear accel)
   accel_noise = 1.2;                               % deg
   bump = 9*exp(-((t-4).^2)/0.05);                  % motion-induced accel error
   theta_acc = theta_true + bump + accel_noise*randn(1,N);
 
-  % --- integrate the gyro alone (drifts) ---------------------------------
   theta_gyro = zeros(1,N);
   for k = 2:N
     theta_gyro(k) = theta_gyro(k-1) + gyro_meas(k)*dt;
@@ -147,9 +121,7 @@ function angle_estimation_plots()
   % ======================================================================
   % Fig 3: the complementary filter in the frequency domain
   % ======================================================================
-  % theta = a*(theta + gyro*dt) + (1-a)*theta_acc  is a first-order blend with
-  % time constant tau = a*dt/(1-a): a LOW-PASS on the accel angle plus a
-  % complementary HIGH-PASS on the gyro angle. They sum to 1 at every frequency.
+  % Complementary blend: LP(accel) + HP(gyro), tau = alpha*dt/(1-alpha), sum = 1
   alpha = 0.98;                       % illustrative (firmware/sim uses ~0.995)
   tau   = alpha*dt/(1-alpha);         % crossover time constant [s]
   fc    = 1/(2*pi*tau);               % crossover frequency [Hz]
@@ -200,8 +172,7 @@ function angle_estimation_plots()
   % ======================================================================
   % Fig 5: Kalman filter - tracks theta AND estimates the gyro bias
   % ======================================================================
-  % 2-state KF: x = [theta; bias].  Predict with the gyro, correct with accel.
-  %   theta[k] = theta[k-1] + (gyro - bias)*dt ;  bias[k] = bias[k-1]
+  % 2-state KF: x = [theta; bias]; predict with gyro, correct with accel
   Q = [1e-3 0; 0 1e-5];               % process noise (angle wander, slow bias)
   Rm = 4.0;                           % accel-angle measurement variance [deg^2]
   A  = [1 -dt; 0 1];
@@ -210,9 +181,9 @@ function angle_estimation_plots()
   xk = [theta_acc(1); 0]; P = eye(2);
   theta_kf = zeros(1,N); bias_kf = zeros(1,N);
   for k = 1:N
-    xk = A*xk + B*gyro_meas(k);       % predict using the gyro
+    xk = A*xk + B*gyro_meas(k);
     P  = A*P*A' + Q;
-    S  = H*P*H' + Rm;                 % correct using the accel angle
+    S  = H*P*H' + Rm;
     Kk = (P*H')/S;
     xk = xk + Kk*(theta_acc(k) - H*xk);
     P  = (eye(2) - Kk*H)*P;
@@ -242,15 +213,15 @@ function angle_estimation_plots()
 
 end
 
-% ---- clean 2D arrow (line + manual arrowhead), no quiver autoscale --------
+% manual 2D arrow (no quiver autoscale)
 function arrow(p0, p1, col, lw)
   p0 = p0(:); p1 = p1(:);
   d  = p1 - p0; Ld = norm(d);
   plot([p0(1) p1(1)], [p0(2) p1(2)], 'color', col, 'linewidth', lw);
   if Ld < 1e-9, return; end
-  u  = d/Ld;                       % direction
-  n  = [-u(2); u(1)];              % normal
-  hl = 0.10; hw = 0.045;           % head length / half-width
+  u  = d/Ld;
+  n  = [-u(2); u(1)];
+  hl = 0.10; hw = 0.045;
   base = p1 - hl*u;
   h1 = base + hw*n; h2 = base - hw*n;
   patch([p1(1) h1(1) h2(1)], [p1(2) h1(2) h2(2)], col, 'edgecolor', col);

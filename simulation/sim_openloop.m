@@ -1,21 +1,15 @@
-% SIM_OPENLOOP  Integrate the UNCONTROLLED plant and watch the body fall over.
-%
-% This is the first sanity check on the model: with no motor force (F = 0) and a
-% tiny initial tilt, the body must topple - that is exactly what makes balancing
-% a control problem. We integrate the nonlinear equations with a fixed-step
-% 4th-order Runge-Kutta (RK4) loop, the same kind of integrator we will reuse
-% under closed loop later.
+% SIM_OPENLOOP  Uncontrolled plant: tiny tilt must topple (F=0, RK4 integration).
 
 clear; clc;
 p = params();
 
 % ---- Simulation settings ------------------------------------------------
-dt    = 0.001;                 % integration step [s] (1 kHz, fine + stable)
+dt    = 0.001;                 % integration step [s]
 T     = 2.0;                   % total time [s]
 N     = round(T / dt);
 theta0_deg = 3;                % initial tilt from upright [deg]
 
-% State: [pos; vel; theta; omega]. Start nearly upright, at rest.
+% State: start nearly upright, at rest.
 x = [0; 0; deg2rad(theta0_deg); 0];
 F = 0;                         % open loop: no control force
 
@@ -23,10 +17,10 @@ t   = zeros(1, N+1);
 X   = zeros(4, N+1);
 X(:,1) = x;
 
-t_fall = NaN;                  % time the body passes 90 deg (fully fallen)
+t_fall = NaN;                  % time past 90 deg
 
 for k = 1:N
-  % --- one RK4 step of the nonlinear dynamics ---
+  % RK4 step
   k1 = plant_dynamics(x,             F, p);
   k2 = plant_dynamics(x + 0.5*dt*k1, F, p);
   k3 = plant_dynamics(x + 0.5*dt*k2, F, p);
@@ -54,7 +48,7 @@ else
 end
 
 % ---- Plot (saved to PNG; works headless) --------------------------------
-warning('off', 'Octave:gnuplot-graphics');   % quiet the "gnuplot discouraged" note
+warning('off', 'Octave:gnuplot-graphics');
 graphics_toolkit('gnuplot');
 fig = figure('visible', 'off', 'position', [100 100 800 600]);
 

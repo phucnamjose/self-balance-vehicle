@@ -43,7 +43,7 @@ from duty to angular speed. Encoder feedback is idealized as unity:
 PI on the speed error plus a **feedforward** term, then deadband compensation,
 then output saturation. The pseudocode below is the continuous law written as a
 per-tick update; how that update is *derived* from $C(s) = K_p + K_i/s$ (which
-discretization rule, and why it is safe at 200 Hz) is in
+discretization rule, and why it is safe at 500 Hz) is in
 [pi-discretization.md](pi-discretization.md):
 
 ```
@@ -100,7 +100,7 @@ the setpoint drops.
 
 ## Measurement: per-tick wheel rate
 
-The loop needs `w_meas` **every tick (200 Hz)**. The current telemetry fields
+The loop needs `w_meas` **every tick (500 Hz)**. The current telemetry fields
 `velL`/`velR` are only computed once per second
 ([../../firmware/main/control.c](../../firmware/main/control.c) lines 98-110), so
 they are too coarse for this loop.
@@ -113,7 +113,7 @@ d_counts = count_now - count_prev
 w_meas   = encoder_cps_to_radps(d_counts / dt)
 ```
 
-At 200 Hz the per-tick count delta is small, so expect quantization noise; a
+At 500 Hz the per-tick count delta is small, so expect quantization noise; a
 light first-order low-pass on `w_meas` (or a short moving average) may be needed.
 This is noted here as a design consideration; the exact filter is decided during
 bring-up against real encoder data.

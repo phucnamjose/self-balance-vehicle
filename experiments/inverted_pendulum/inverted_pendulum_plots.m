@@ -1,21 +1,7 @@
 % INVERTED_PENDULUM_PLOTS  Figures for docs/theory/inverted-pendulum.md.
-%
-% Illustrates the inverted-pendulum-on-a-cart model that the whole balance
-% study rests on: the geometry, why the upright is UNSTABLE (open-loop fall),
-% the pole picture (a right-half-plane pole), the phase-plane saddle, and why a
-% linear model about upright is legitimate for the controller.
-%
-% The model itself is reused from ../../simulation (params, plant_dynamics,
-% linearize) so these figures always match the sim - change a parameter there
-% and every figure here updates with it. Base Octave only (no toolboxes).
-%
-% Generates five PNGs into docs/theory/ (referenced by inverted-pendulum.md):
-%   ip-schematic.png      - cart-pendulum coordinates + forces
-%   ip-fall.png           - open-loop: inverted tips over vs hanging oscillates
-%   ip-poles.png          - s-plane poles: inverted (RHP pole) vs hanging (jw axis)
-%   ip-phase.png          - phase portrait: saddle at upright, centre at hanging
-%   ip-linearization.png  - sin(theta) ~ theta and linear-vs-nonlinear fall
-%
+% Cart-pendulum model: geometry, open-loop fall, poles, phase plane, linearization.
+% Reuses ../../simulation (params, plant_dynamics, linearize). Base Octave only.
+% Outputs: ip-schematic/fall/poles/phase/linearization.png -> docs/theory/
 % Run:  cd experiments/inverted_pendulum && octave --eval inverted_pendulum_plots
 
 function inverted_pendulum_plots()
@@ -28,15 +14,15 @@ function inverted_pendulum_plots()
 
   p = params();
 
-  % ---- shared colours (match the other theory figures) --------------------
-  col_true = [0.15 0.15 0.15];       % near-black
-  col_inv  = [0.85 0.33 0.10];       % inverted / unstable (orange)
-  col_hang = [0.20 0.55 0.20];       % hanging / stable   (green)
-  col_lin  = [0.00 0.45 0.74];       % linear model       (blue)
+  % ---- shared colours ----------------------------------------------------
+  col_true = [0.15 0.15 0.15];
+  col_inv  = [0.85 0.33 0.10];
+  col_hang = [0.20 0.55 0.20];
+  col_lin  = [0.00 0.45 0.74];
   col_grey = [0.55 0.55 0.55];
 
   % ======================================================================
-  % Fig 1: the cart-pendulum, coordinates and forces
+  % Fig 1: cart-pendulum coordinates and forces
   % ======================================================================
   th = deg2rad(25);                              % draw a 25 deg tilt for clarity
   l  = 1.0;                                       % CoM arm (drawing units)
@@ -102,11 +88,8 @@ function inverted_pendulum_plots()
   print(fig, fullfile(outdir, 'ip-schematic.png'), '-dpng', '-r110');
 
   % ======================================================================
-  % Fig 2: open-loop response (F = 0) - the upright FALLS, the hanging SWINGS
+  % Fig 2: open-loop (F=0) — upright runs away, hanging oscillates
   % ======================================================================
-  % Same nonlinear plant for both; only the starting angle differs.
-  %   inverted: released 3 deg from UPRIGHT (theta = 0)   -> runs away
-  %   hanging : released 3 deg from DOWN    (theta = pi)  -> oscillates
   th0 = deg2rad(3);
 
   [ti, xi] = simulate([0;0; th0;      0], 1.4, p);   % inverted
@@ -115,9 +98,9 @@ function inverted_pendulum_plots()
   theta_inv  = xi(:,3) * 180/pi;                      % deg from upright
   theta_hang = (xg(:,3) - pi) * 180/pi;              % deg from hanging equilibrium
 
-  % pure exponential envelope from the unstable pole, for the inverted case
+  % unstable-pole exponential envelope
   [A, ~]  = linearize(p);
-  lam     = max(real(eig(A)));                        % ~ +20.57 rad/s (short body)
+  lam     = max(real(eig(A)));
   t2      = log(2)/lam;                               % time-to-double
   env     = 3 * exp(lam * ti);
 
@@ -144,10 +127,8 @@ function inverted_pendulum_plots()
   print(fig, fullfile(outdir, 'ip-fall.png'), '-dpng', '-r110');
 
   % ======================================================================
-  % Fig 3: open-loop poles in the s-plane (inverted vs hanging)
+  % Fig 3: open-loop poles — inverted (upright) vs hanging (theta = pi)
   % ======================================================================
-  % Inverted: linearize about upright (x = 0).  Hanging: linearize the SAME
-  % plant about the down equilibrium (theta = pi) by finite differences.
   [Ai, ~] = linearize(p);
   Ah = jacobian_about([0;0;pi;0], p);
   ei = eig(Ai);
@@ -190,10 +171,7 @@ function inverted_pendulum_plots()
   % ======================================================================
   % Fig 4: phase portrait of the (undamped, undriven) pendulum angle
   % ======================================================================
-  % theta'' = (g/l) sin(theta)   (theta from UPRIGHT: gravity destabilises).
-  % Conserved energy  E = 1/2 w^2 - (g/l) cos(theta).  Upright (0,0) is a
-  % SADDLE; hanging (+-pi, 0) are CENTRES. The separatrix (E = -(g/l)*... )
-  % divides "falls over" from "swings back".
+  % theta'' = (g/l) sin(theta); upright (0,0) saddle, hanging (+-pi,0) centres
   w2 = p.g / p.l;                                    % (rad/s)^2
   wn = sqrt(w2);
 
@@ -241,11 +219,8 @@ function inverted_pendulum_plots()
   print(fig, fullfile(outdir, 'ip-phase.png'), '-dpng', '-r110');
 
   % ======================================================================
-  % Fig 5: why a LINEAR model about upright is legitimate
+  % Fig 5: sin(theta) ~ theta; linear model valid at small tilt
   % ======================================================================
-  % Left : sin(theta) ~ theta - the approximation the linear model rests on.
-  % Right: nonlinear fall vs the linear model x_dot = A x - they agree while
-  %        the tilt is small (exactly the regime the controller keeps us in).
   fig = figure('visible','off','position',[100 100 900 420]);
 
   subplot(1,2,1); hold on; grid on;
@@ -287,7 +262,7 @@ function inverted_pendulum_plots()
 
 end
 
-% ---- RK4 integration of the nonlinear plant with F = 0 --------------------
+% RK4 integration, F = 0
 function [t, X] = simulate(x0, T, p)
   dt = 1e-3;
   t  = (0:dt:T)';
@@ -304,7 +279,7 @@ function [t, X] = simulate(x0, T, p)
   end
 end
 
-% ---- Jacobian d(f)/d(x) about an arbitrary equilibrium (central diff) -----
+% Jacobian d(f)/d(x) about an equilibrium (central diff)
 function A = jacobian_about(x0, p)
   n = numel(x0); A = zeros(n);
   h = 1e-6;
@@ -314,7 +289,7 @@ function A = jacobian_about(x0, p)
   end
 end
 
-% ---- clean 2D arrow (line + manual arrowhead) ----------------------------
+% manual 2D arrow
 function arrow(p0, p1, col, lw)
   p0 = p0(:); p1 = p1(:);
   d  = p1 - p0; Ld = norm(d);

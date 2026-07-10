@@ -1,14 +1,6 @@
 % LOOP_RATE_PLOTS  Figures for docs/theory/loop-rates.md.
-%
-% Visualises the whole frequency stack of the balance-bot control system, with a
-% frequency-domain emphasis. Base Octave only (no control package).
-%
-% Generates four PNGs into docs/theory/ (referenced by loop-rates.md):
-%   loop-rates-map.png       - the system frequency map (every rate on one log axis)
-%   loop-rates-cascade.png   - nested closed-loop bandwidths + the separation squeeze
-%   loop-rates-delay.png     - sample-and-hold phase penalty vs frequency (100/200/400 Hz)
-%   loop-rates-antialias.png - IMU DLPF vs Nyquist: anti-aliasing before folding
-%
+% Control-system frequency stack. Base Octave only (no control package).
+% Outputs: loop-rates-map/cascade/delay/antialias.png -> docs/theory/
 % Run:  cd experiments/loop_rates && octave --eval loop_rate_plots
 
 function loop_rate_plots()
@@ -18,7 +10,7 @@ function loop_rate_plots()
   warning('off', 'Octave:gnuplot-graphics');
   graphics_toolkit('gnuplot');
 
-  % ---- key frequencies [rad/s] (see the doc) -----------------------------
+  % ---- key frequencies [rad/s] -------------------------------------------
   w_vel   = 2;        % outer velocity/position loop crossover (target)
   w_wpole = 5.3;      % open-loop wheel pole 1/tau
   w_unst  = 20.57;    % unstable body pole (RHP)
@@ -44,14 +36,14 @@ function loop_rate_plots()
   set(gca, 'xscale', 'log');
   xlim([1 1e5]); ylim([0.2 4.9]);
 
-  % lane guide lines + labels (lane 4 = plant ... lane 1 = carrier)
+  % lane guide lines (lane 4 = plant ... lane 1 = carrier)
   lanes = {'carrier', 'digital / sensor', 'loop crossovers', 'plant dynamics'};
   for L = 1:4
     plot([1 1e5], [L L], '-', 'color', [.88 .88 .88], 'linewidth', 8);
   end
   set(gca, 'ytick', 1:4, 'yticklabel', lanes);
 
-  % shaded "control band" (where the loops do their work): up to ~50 rad/s
+  % control band: up to ~50 rad/s
   patch([1 50 50 1], [0.2 0.2 4.9 4.9], [0.90 0.95 0.90], ...
         'edgecolor', 'none', 'facealpha', 0.5);
 
@@ -71,7 +63,7 @@ function loop_rate_plots()
   stem_label(w_fs,    2, ' f_s 200 Hz',            col_dig,   0.12);
   stem_label(w_pwm,   1, ' PWM 10 kHz',            col_carr,  0.12);
 
-  % the oversampling gap between the fastest loop and Nyquist (rule 3)
+  % oversampling gap: fastest loop vs Nyquist (rule 3)
   yb = 2.40;
   plot([w_wheel w_nyq], [yb yb], 'k-', 'linewidth', 1);
   plot(w_wheel, yb, 'k<', w_nyq, yb, 'k>', 'markersize', 6);
@@ -147,13 +139,13 @@ function loop_rate_plots()
 
   fig = figure('visible','off','position',[100 100 900 520]);
   hold on; grid on;
-  % shaded signal band (what the balance loop actually uses, up to ~5 Hz)
+  % shaded signal band (balance loop uses up to ~5 Hz)
   patch([1 5 5 1], [-60 -60 5 5], [0.90 0.95 0.90], 'edgecolor','none','facealpha',0.6);
   semilogx(f, 20*log10(H), 'linewidth', 2.5, 'color', col_dig);
   plot([100 100], [-60 5], 'k--', 'linewidth', 1.2);   % Nyquist
   plot([200 200], [-60 5], 'k:',  'linewidth', 1.2);   % sample rate
   plot([fc fc],   [-60 5], 'color', col_dig, 'linestyle','--');
-  % a vibration above Nyquist that would fold back, and its attenuation
+  % 150 Hz vibration above Nyquist (folds to 50 Hz)
   fv = 150; Hv = 20*log10(1/sqrt(1+(fv/fc)^4));
   plot(fv, Hv, 'o', 'markersize', 8, 'markerfacecolor', col_unst, 'markeredgecolor', col_unst);
   text(fv*0.92, Hv+7, sprintf('150 Hz vibration cut %.0f dB', Hv), ...

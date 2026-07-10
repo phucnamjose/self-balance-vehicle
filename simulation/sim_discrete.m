@@ -1,41 +1,5 @@
-% SIM_DISCRETE  The realistic loop: 200 Hz control, IMU sensors, complementary
-%               filter, encoder velocity, and a motor model (deadband, back-EMF,
-%               saturation).
-%
-% Steps 3-5 gave the controller a perfect, continuous view of the world and a
-% force input it could apply directly. The real robot has none of that. This
-% script adds the five things that actually shape a balancing robot, so the
-% simulation behaves like the firmware will:
-%
-%   1. SAMPLING        - the controller runs once every 5 ms (200 Hz, the
-%                        firmware CONTROL_HZ) and HOLDS its output until the next
-%                        tick (zero-order hold). The plant evolves continuously
-%                        in between (integrated in fine substeps).
-%
-%   2. SENSORS         - we do not measure theta directly. The MPU6050 gives a
-%                        tilt RATE (gyro, + bias + noise) and a tilt ANGLE
-%                        (accel, contaminated by the cart's acceleration + noise).
-%                        Wheel speed comes from the encoders (+ a little noise).
-%
-%   3. STATE ESTIMATE  - a COMPLEMENTARY FILTER fuses gyro + accel into theta:
-%                          theta_est = a*(theta_est + gyro*dt) + (1-a)*theta_acc
-%
-%   4. MOTOR MODEL     - the controller's force becomes a PWM duty in [-1,1].
-%                        Below a deadband the motor does not move; torque falls
-%                        off with speed (back-EMF: tau = u*tau_stall - k*w); duty
-%                        saturates at 1.
-%
-%   5. COMPENSATION    - two firmware tricks that make the above workable:
-%                        * BACK-EMF FEEDFORWARD: the motor's torque drops ~25 N
-%                          per m/s of cart speed. Knowing the wheel speed (from
-%                          the encoders) we add that back, so the motor delivers
-%                          the force the PID asked for. Without it the cart is
-%                          too sluggish to get under the body and it topples.
-%                        * DEADBAND COMPENSATION: remap [0,1] -> [deadband,1] so
-%                          small commands still produce motion.
-%
-% Same angle-PID gains as Step 5 - the point is that with honest sensing and a
-% real actuator (plus the two compensations) the same controller still balances.
+% SIM_DISCRETE  Realistic loop: 200 Hz, IMU, complementary filter, motor model.
+% Adds sampling/ZOH, noisy sensors, back-EMF feedforward, deadband compensation.
 
 clear; clc;
 p = params();
@@ -44,9 +8,7 @@ p = params();
 Kp = 45.0; Ki = 15.0; Kd = 5.0;
 
 % ---- Complementary filter + sensor model --------------------------------
-alpha       = 0.995;                % filter weight on the gyro (0..1). Higher =
-                                    % trust the gyro more, so the accelerometer's
-                                    % motion contamination leaks in less.
+alpha       = 0.995;                % gyro weight (higher = less accel contamination)
 gyro_bias   = deg2rad(0.1);         % residual gyro offset AFTER calibration [rad/s]
 gyro_noise  = deg2rad(1.0);         % gyro noise std [rad/s]
 accel_noise = deg2rad(2.0);         % accel-angle noise std [rad]
@@ -94,15 +56,14 @@ for n = 1:Nticks
   F_des = -(Kp*e + Ki*e_int + Kd*(-gyro_meas));   % D term uses measured rate
 
   % ===== ACTUATE =====
-  % Back-EMF feedforward: cancel the motor's speed-dependent torque droop using
-  % the measured wheel speed, so the delivered force tracks F_des.
+  % Back-EMF feedforward: cancel speed-dependent torque droop
   F_cmd = F_des + K_bemf*vel_meas;
 
   u = F_cmd / F_stall;                              % desired duty in [-1,1]
   u = max(-p.motor.u_max, min(p.motor.u_max, u));   % saturate
   if abs(u) >= p.motor.u_max, e_int = e_int - e*dt_ctrl; end   % anti-windup
 
-  % Deadband compensation: remap [0,1] -> [deadband,1] so small commands move.
+  % Deadband remap [0,1] -> [deadband,1]
   db = p.motor.deadband;
   if abs(u) > 1e-3
     u_applied = sign(u) * (db + (1-db)*abs(u));

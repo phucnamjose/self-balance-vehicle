@@ -18,9 +18,8 @@ static const char *TAG = "encoders";
 #define ENC_PCNT_LOW       (-30000)               /* and the watch callback accumulates it */
 #define ENC_GLITCH_NS      1000                   /* ignore pulses shorter than 1 us */
 
-/* The right wheel is mounted mirror-image to the left, so its encoder counts
- * down when the robot drives forward. Flip its sign so +counts = forward for
- * both wheels (keeps position and the velocity deltas consistent downstream). */
+/* The wheels are mirror-mounted, so flip one sign to make +counts = forward for
+ * both (keeps position and velocity deltas consistent downstream). */
 #define ENC_L_SIGN         (-1)
 #define ENC_R_SIGN         (+1)
 

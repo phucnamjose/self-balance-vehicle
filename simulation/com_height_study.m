@@ -1,20 +1,6 @@
-% COM_HEIGHT_STUDY  How the unstable pole (=> how hard to balance) depends on the
-% CoM height l. Uses the real linearize.m on the actual plant, so it stays
-% consistent with the rest of the sim.
-%
-% The unstable pole p_u sets the time-to-double td = ln2/p_u: the smaller p_u
-% (the longer td), the more time the lagging inner loop has to react, i.e. the
-% EASIER to balance. Two physically distinct ways to "raise the CoM":
-%
-%   A) Shift mass within the CURRENT chassis (body height fixed at 0.0875 m, so
-%      the body inertia I is fixed; l can only range 0..body_height).
-%   B) Build a TALLER robot with a roughly uniform body (body_height = 2*l, so
-%      I = (1/12) m (2l)^2 grows with height). This is the realistic way to get
-%      a large l.
-%
-% Reference: the inner wheel loop closes to ~37 ms; you want td comfortably
-% larger than that. Rough guide: td < ~40 ms marginal, ~70 ms comfortable,
-% >100 ms easy.
+% COM_HEIGHT_STUDY  Unstable pole vs CoM height l (via linearize.m).
+% td = ln2/p_u: longer td => easier balance. A: fixed chassis, shift l. B: taller
+% uniform body (body_height=2l, I grows). Inner loop ~37 ms; want td >> that.
 
 clear; clc;
 here = fileparts(mfilename('fullpath')); addpath(here);
@@ -27,18 +13,18 @@ p0 = params();
     td = log(2) / pu;          % time-to-double [s]
   end
 
-% ---- Scenario A: fixed current body, just move the CoM -----------------------
+% ---- Scenario A: fixed chassis -----------------------------------------------
 printf('== Scenario A: fixed chassis (body_height = %.4f m, I fixed) ==\n', p0.body_height);
 printf('   l (m)   pole (rad/s)   t_double (ms)\n');
 lA = 0.02:0.01:p0.body_height;
 puA = zeros(size(lA)); tdA = zeros(size(lA));
 for k = 1:numel(lA)
-  p = p0; p.l = lA(k);                       % I_body unchanged (chassis unchanged)
+  p = p0; p.l = lA(k);                       % I_body fixed
   [puA(k), tdA(k)] = pole_of(p);
   printf('   %.3f      %6.2f         %6.1f\n', lA(k), puA(k), 1e3*tdA(k));
 end
 
-% ---- Scenario B: taller uniform robot (body_height = 2*l) --------------------
+% ---- Scenario B: taller uniform body ---------------------------------------
 printf('\n== Scenario B: taller uniform body (body_height = 2*l, I grows) ==\n');
 printf('   l (m)   height*(m)  pole (rad/s)  t_double (ms)\n');
 lB = 0.05:0.025:0.30;
@@ -46,10 +32,10 @@ puB = zeros(size(lB)); tdB = zeros(size(lB));
 for k = 1:numel(lB)
   p = p0;
   p.l           = lB(k);
-  p.body_height = 2*lB(k);                   % uniform body, CoM at mid-height
+  p.body_height = 2*lB(k);                   % CoM at mid-height
   p.I_body      = (1/12) * p.m_body * p.body_height^2;
   [puB(k), tdB(k)] = pole_of(p);
-  Htot = p.r_wheel + p.body_height;          % axle-to-top + wheel radius ~ overall height
+  Htot = p.r_wheel + p.body_height;          % overall height
   printf('   %.3f     %.3f       %6.2f        %6.1f\n', lB(k), Htot, puB(k), 1e3*tdB(k));
 end
 

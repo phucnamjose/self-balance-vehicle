@@ -1,0 +1,35 @@
+---
+description: Keep code comments short and meaningful
+alwaysApply: true
+---
+
+# Comment Style
+
+Comments are allowed, but keep them short and meaningful. Do not be verbose.
+
+- Prefer a single one-line comment over a paragraph.
+- Only comment on non-obvious intent, trade-offs, or constraints. Never narrate what the code plainly does.
+- Inline (trailing) comments are fine for a short note on a line, e.g. units or a constant's meaning. Keep them brief.
+- Method/function headers may use more than one line to describe purpose, params, and behavior.
+
+```c
+// ❌ BAD: verbose, narrates the obvious
+// This function takes a value, then it increments the counter by one,
+// and finally it returns the new value to the caller.
+int inc(int x) { return x + 1; }
+
+// ✅ GOOD: one-line, only when it adds meaning
+// Clamp to avoid integrator wind-up near saturation
+int inc(int x) { return x + 1; }
+
+// ✅ GOOD: short inline note on the line
+#define MPU_I2C_TIMEOUT_MS 1   // fail fast, well under one control tick
+float dt = 0.002f;             // loop period [s]
+```
+
+```c
+// ✅ GOOD: multi-line allowed at a method header
+// Fuses gyro + accel to estimate tilt angle.
+// dt: loop period in seconds; returns angle in radians.
+float estimate_tilt(float gyro, float accel, float dt) { ... }
+```

@@ -161,10 +161,10 @@ that ignores reality.
 
 The real discrete loop adds two lags the cancellation cannot remove:
 
-- a **sample-and-hold + compute delay** $e^{-s T_d}$, with $T_d \approx 1.5\,\Delta t = 7.5\ \text{ms}$
-  at 200 Hz, and
+- a **sample-and-hold + compute delay** $e^{-s T_d}$, with $T_d \approx 1.5\,\Delta t = 3\ \text{ms}$
+  at 500 Hz, and
 - a light **measurement low-pass** on the (quantized) encoder-rate signal,
-  $\dfrac{1}{\tau_f s + 1}$, with $\tau_f \approx 8\ \text{ms}$.
+  $\dfrac{1}{\tau_f s + 1}$, with $\tau_f = 20\ \text{ms}$ (`WHEEL_PI_TAU_F` in `wheel_pi.c`).
 
 **Why cancellation can't remove them.** The IMC trick kills a *pole* by parking a
 *zero* on it - pure algebra on rational transfer functions. The delay $e^{-sT_d}$
@@ -174,12 +174,12 @@ place - a zero there would re-amplify the encoder quantization noise the filter
 exists to suppress. Both pass ~unit magnitude at low frequency but add **negative
 phase** that grows with frequency, which is what erodes phase margin:
 
-- delay: $\angle = -\omega T_d$ (linear, unbounded) $\to -11^\circ$ at $\omega_c$;
-- filter: $\angle = -\arctan(\omega\tau_f)$ (saturates at $-90^\circ$) $\to -12^\circ$ at $\omega_c$.
+- delay: $\angle = -\omega T_d$ (linear, unbounded) $\to -4^\circ$ at $\omega_c$;
+- filter: $\angle = -\arctan(\omega\tau_f)$ (saturates at $-90^\circ$) $\to -25^\circ$ at $\omega_c$.
 
 So the phase budget at crossover is
-$-90^\circ_{\,\text{(integrator)}} - 11^\circ_{\,\text{(delay)}} - 12^\circ_{\,\text{(filter)}} \approx -113^\circ$,
-i.e. $\mathrm{PM} \approx 67^\circ$ - the finite margin below in place of the ideal
+$-90^\circ_{\,\text{(integrator)}} - 4^\circ_{\,\text{(delay)}} - 25^\circ_{\,\text{(filter)}} \approx -119^\circ$,
+i.e. $\mathrm{PM} \approx 60^\circ$ - the finite margin below in place of the ideal
 integrator's $90^\circ$.
 
 So the loop actually analyzed is:
@@ -194,14 +194,14 @@ For the worked gains this gives healthy margins:
 
 | Quantity | Value | Target |
 |----------|-------|--------|
-| Gain crossover $\omega_c$ | 25.8 rad/s | - |
-| Phase margin $\mathrm{PM}$ | $67^\circ$ | $> 45$-$60^\circ$ |
-| Gain margin $\mathrm{GM}$ | 15 dB | $> 6$ dB |
+| Gain crossover $\omega_c$ | 23.8 rad/s | - |
+| Phase margin $\mathrm{PM}$ | $60^\circ$ | $> 45$-$60^\circ$ |
+| Gain margin $\mathrm{GM}$ | 22.3 dB | $> 6$ dB |
 
 The locus passes well to the right of the `-1` point and does not encircle it, so
 the closed loop is stable with comfortable robustness to gain error (the +/-13%
 battery-voltage swing in `K` from [motor-identification.md](motor-identification.md)
-is easily inside a 15 dB gain margin).
+is easily inside a 22.3 dB gain margin).
 
 ### Same information as a Bode plot
 
@@ -211,12 +211,12 @@ Nyquist for tuning:
 ![Bode of the wheel-speed PI loop](pi-tuning-bode.png)
 
 - **Magnitude** falls at $-20$ dB/decade (the integrator) and crosses 0 dB at the
-  gain crossover $\omega_c = 25.8$ rad/s (red dashed). The extra roll-off past
-  ~100 rad/s is the measurement low-pass.
+  gain crossover $\omega_c = 23.8$ rad/s (red dashed). The extra roll-off past
+  ~50 rad/s is the measurement low-pass.
 - **Phase** starts at $-90^\circ$ (integrator), and at $\omega_c$ it sits at
-  $-113^\circ$ - the gap to $-180^\circ$ is the **phase margin, $67^\circ$**.
-- Where the phase reaches $-180^\circ$ ($\omega_p = 112$ rad/s, magenta) the
-  magnitude is 15 dB below 0 dB - that gap is the **gain margin, 15 dB**.
+  $-119^\circ$ - the gap to $-180^\circ$ is the **phase margin, $60^\circ$**.
+- Where the phase reaches $-180^\circ$ ($\omega_p = 126$ rad/s, magenta) the
+  magnitude is 22.3 dB below 0 dB - that gap is the **gain margin, 22.3 dB**.
 
 Nyquist and Bode are the same $L(j\omega)$, just plotted differently: the Nyquist
 shows distance from $-1$, the Bode shows the margins as vertical gaps.
@@ -256,8 +256,8 @@ the wheel-speed bring-up:
 ```octave
 K = 34; tau = 0.19; tau_cl = tau/5;
 Kp = tau/(K*tau_cl);  Ki = 1/(K*tau_cl);
-dt = 1/200; ad = exp(-dt/tau); bd = K*(1-ad);   % exact ZOH plant
-w = 0; I = 0; wsp = 10; N = 200; W = zeros(1,N);
+dt = 1/500; ad = exp(-dt/tau); bd = K*(1-ad);   % exact ZOH plant
+w = 0; I = 0; wsp = 10; N = 500; W = zeros(1,N);
 for k = 1:N
   e = wsp - w;
   u = Kp*e + I + Ki*dt*e;

@@ -1,27 +1,10 @@
-% SIM_CLOSEDLOOP_PID  Balance the body with an angle PID on the nonlinear plant.
-%
-% Now we close the loop. A PID controller looks at the tilt error (we want
-% theta = 0) and commands a cart force F to drive it back upright:
-%
-%       e   = theta_ref - theta          (theta_ref = 0: stay upright)
-%       F   = -(Kp*e + Ki*Int(e) + Kd*de/dt)
-%
-% Sign intuition (from linearize.m): a positive tilt needs a positive force to
-% drive the wheels under the body. With the error e = -theta, F = Kp*theta + ...
-% comes out positive for a forward tilt - correct.
-%
-% This step uses the FULL state directly (perfect angle + rate), integrates the
-% true nonlinear dynamics at a fine step, and clamps F to what the motors can
-% physically produce. Sensor noise, sampling at 200 Hz, and the motor model come
-% in Step 6 (sim_discrete.m). Here we just want gains that balance.
+% SIM_CLOSEDLOOP_PID  Angle PID on nonlinear plant (perfect state, continuous F).
+% F = -(Kp*e + Ki*Int(e) + Kd*de/dt); positive tilt needs positive F.
 
 clear; clc;
 p = params();
 
-% ---- PID gains (start from the linear model, then tune) -----------------
-% Kp must be strong enough to beat gravity (it overcomes the m*g*l*sin(theta)
-% destabilizing torque); Kd adds damping so it does not overshoot; Ki removes
-% any slow steady tilt offset. These were tuned against the nonlinear plant.
+% ---- PID gains (tuned on nonlinear plant) ------------------------------
 Kp = 45.0;     % force per rad of tilt         [N/rad]
 Ki = 15.0;     % force per rad*s of tilt        [N/(rad*s)]
 Kd = 5.0;      % force per rad/s of tilt rate   [N/(rad/s)]
@@ -33,7 +16,7 @@ N     = round(T / dt);
 theta_ref = 0;                 % upright target
 x = [0; 0; deg2rad(5); 0];     % start tilted 5 deg, at rest
 
-% Physical force ceiling: both motors at stall, force = n*tau_stall / r.
+% Physical force ceiling: n*tau_stall/r at stall.
 F_max = p.n_wheels * p.motor.tau_stall / p.r_wheel;
 
 t  = zeros(1, N+1);
@@ -47,11 +30,10 @@ for k = 1:N
   omega = x(4);
   e     = theta_ref - theta;
   e_int = e_int + e*dt;
-  % de/dt of the error = -omega (ref is constant).
+  % de/dt = -omega (constant ref)
   F = -(Kp*e + Ki*e_int + Kd*(-omega));
 
-  % Saturate to the motors' capability (and anti-windup: stop integrating
-  % when saturated so the integral term can't blow up).
+  % Saturate F; anti-windup when clipped
   if F >  F_max, F =  F_max; e_int = e_int - e*dt; end
   if F < -F_max, F = -F_max; e_int = e_int - e*dt; end
 

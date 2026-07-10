@@ -23,19 +23,14 @@ void control_start(void);
 /* Current lifecycle mode. */
 control_mode_t control_mode(void);
 
-/* Switch lifecycle mode:
- *   STOP_CONTROL  - stop the control task (delete it at a safe point, not just
- *                   suspend) and force the motors off. Distinct from the 'stop'
- *                   motor-test command, which only zeroes the outputs while the
- *                   task keeps running. Required before an OTA flash.
- *   START_CONTROL - start or restart the control task.
- * The peripherals and GPTimer are initialised once and reused across restarts. */
+/* Switch lifecycle mode. STOP_CONTROL deletes the task at a safe point and forces
+ * the motors off (required before an OTA flash); START_CONTROL (re)starts it.
+ * Peripherals and the GPTimer are initialised once and reused across restarts. */
 void control_set_mode(control_mode_t mode);
 
-/* Experiment presets for bring-up / research. Selecting one sets the two feature
- * flags below to a known combination; you can also flip either flag on its own
- * for a custom combo. These only change what the control loop *computes* - they
- * are orthogonal to the STOP/START lifecycle above. */
+/* Experiment presets for bring-up/research: each sets the feature flags below to a
+ * known combination (flip flags individually for a custom combo). These only change
+ * what the loop computes, orthogonal to the STOP/START lifecycle. */
 typedef enum {
     TEST_MOTORS,             /* open-loop motor test: estimation OFF, controller OFF */
     TEST_MOTOR_CONTROLLERS,  /* wheel/motor controller ON, estimation OFF */
@@ -46,9 +41,8 @@ typedef enum {
 /* Apply an experiment preset (overwrites the feature flags). */
 void control_set_experiment(experiment_mode_t mode);
 
-/* Individual feature flags read every tick by the control loop. The balance
- * (outer) loop needs both estimation (for the tilt) and the wheel controller
- * (the inner loop it commands) enabled to have any effect. */
+/* Individual feature flags, read every tick. The balance (outer) loop needs both
+ * estimation and the wheel controller enabled to have any effect. */
 bool control_estimation_enabled(void);
 void control_set_estimation(bool on);
 bool control_controller_enabled(void);
@@ -56,13 +50,10 @@ void control_set_controller(bool on);
 bool control_balance_enabled(void);
 void control_set_balance(bool on);
 
-/* Scripted open-loop motor playback (TEST_MOTORS only). Load a list of steps,
- * each "hold (mL,mR) for dur seconds" (mL,mR each -1..+1, at most PLAYBACK_MAX
- * steps). On start() the player's clock begins at 0; it applies each step for
- * its duration in turn, then parks the motors. Fill the list incrementally:
- * begin() clears it, append() adds a step (returns the new count, -1 when full,
- * -2 if dur <= 0), start() plays from the top, stop() halts and parks.
- * active()/len()/pos() report progress (len/pos are step counts). */
+/* Scripted open-loop motor playback (TEST_MOTORS only): a list of steps, each
+ * "hold (mL,mR) for dur seconds". Fill incrementally: begin() clears, append()
+ * adds a step (returns the new count, -1 full, -2 if dur <= 0), start() plays,
+ * stop() halts and parks. active()/len()/pos() report progress. */
 void control_playback_begin(void);
 int  control_playback_append(float dur, float mL, float mR);
 void control_playback_start(void);
@@ -71,22 +62,15 @@ bool control_playback_active(void);
 int  control_playback_len(void);
 int  control_playback_pos(void);
 
-/* Deadband sweep (TEST_MOTORS only). Slowly ramps both motors from 0 up to an
- * internal ceiling, first forward then reverse, and latches the duty at which
- * each wheel first turns (measured from its encoder). Report-only: when it
- * finishes, the reporter task broadcasts the four thresholds (L/R, fwd/rev) to
- * the terminal so the deadband constant can be updated during bring-up.
- * start() begins the sweep, stop() aborts and parks, active() reports progress. */
+/* Deadband sweep (TEST_MOTORS only): ramps both motors 0..ceiling forward then
+ * reverse and latches the duty where each wheel first turns. Report-only - the
+ * reporter broadcasts the four thresholds (L/R, fwd/rev). start()/stop()/active(). */
 void control_deadband_start(void);
 void control_deadband_stop(void);
 bool control_deadband_active(void);
 
-/* Gyro-bias calibration (any experiment). Averages the gyro for a couple of
- * seconds while the robot is held motionless and stores the mean as the IMU's
- * zero-rate bias, so the estimator integrates a debiased gyro. Orientation does
- * not matter (gyro bias is orientation-independent) but the robot must be still;
- * if motion is detected the bias is left unchanged. Requires START_CONTROL (the
- * IMU is only read while the control loop runs). start() arms it; when it
- * finishes the reporter broadcasts the result. active() reports progress. */
+/* Gyro-bias calibration (any experiment): averages the gyro while held motionless
+ * (~2 s) and stores the mean as the IMU's zero-rate bias; motion leaves it unchanged.
+ * Requires START_CONTROL. start() arms it, the reporter broadcasts the result. */
 void control_gyrocal_start(void);
 bool control_gyrocal_active(void);

@@ -1,15 +1,6 @@
 % DISCRETIZATION_PLOTS  Figures for docs/theory/pi-discretization.md.
-%
-% Illustrates the continuous -> discrete conversion of the wheel-speed PI, with a
-% focus on the frequency domain. Base Octave only (no control package): every
-% transfer function is evaluated on a grid by hand.
-%
-% Generates four PNGs into docs/theory/ (referenced by pi-discretization.md):
-%   pi-disc-sampling.png  - sampling + zero-order hold in the time domain
-%   pi-disc-splane.png    - how the 3 rules map the s-plane jw axis into the z-plane
-%   pi-disc-bode.png      - Bode of continuous C(s) vs discrete C(z) (3 rules)
-%   pi-disc-step.png      - closed-loop step: continuous vs discrete (ZOH) loop
-%
+% Continuous -> discrete PI conversion; hand-evaluated TFs. Base Octave only.
+% Outputs: pi-disc-sampling/splane/bode/step.png -> docs/theory/
 % Run:  cd experiments/pi_discretization && octave --eval discretization_plots
 
 function discretization_plots()
@@ -23,14 +14,14 @@ function discretization_plots()
   K = 34; tau = 0.19; tau_cl = tau/5;
   Kp = tau/(K*tau_cl);            % 0.147
   Ki = 1/(K*tau_cl);             % 0.774
-  dt = 1/200;                     % 200 Hz tick
-  wN = pi/dt;                     % Nyquist frequency [rad/s] ~ 628
-  wc = 25.8;                      % gain crossover of the loop [rad/s]
+  dt = 1/500;                     % 500 Hz tick
+  wN = pi/dt;                     % Nyquist frequency [rad/s] ~ 1571
+  wc = 23.8;                      % gain crossover of the loop [rad/s]
 
-  col_c = [0.55 0.55 0.55];       % continuous (grey)
-  col_f = [0.85 0.33 0.10];       % forward  (orange)
-  col_b = [0.20 0.55 0.20];       % backward (green)
-  col_t = [0.00 0.45 0.74];       % Tustin   (blue)
+  col_c = [0.55 0.55 0.55];
+  col_f = [0.85 0.33 0.10];
+  col_b = [0.20 0.55 0.20];
+  col_t = [0.00 0.45 0.74];
 
   % ======================================================================
   % Fig 1: sampling + zero-order hold
@@ -51,7 +42,7 @@ function discretization_plots()
   ylim([-1.3 1.3]);
   legend('continuous e(t)', 'held output (ZOH)', 'samples e[k]', ...
          'location', 'southeast');
-  title('Sampling + zero-order hold at 200 Hz (\Delta t = 5 ms)');
+  title('Sampling + zero-order hold at 500 Hz (\Delta t = 2 ms)');
   print(fig, fullfile(outdir, 'pi-disc-sampling.png'), '-dpng', '-r110');
 
   % ======================================================================
@@ -62,11 +53,11 @@ function discretization_plots()
   hold on; grid on; axis equal;
   % unit circle = discrete stability boundary
   plot(cos(th), sin(th), 'k', 'linewidth', 1.5);
-  % forward Euler: jw -> vertical line Re(z) = 1 (tangent, pokes out on the left)
+  % forward Euler: jw -> Re(z) = 1
   plot([1 1], [-1.6 1.6], 'linewidth', 2, 'color', col_f);
-  % backward Euler: jw -> circle |z - 0.5| = 0.5 (inside the unit circle)
+  % backward Euler: jw -> |z - 0.5| = 0.5
   plot(0.5 + 0.5*cos(th), 0.5*sin(th), 'linewidth', 2, 'color', col_b);
-  % Tustin: jw -> the unit circle itself (exact)
+  % Tustin: jw -> unit circle
   plot(cos(th), sin(th), '--', 'linewidth', 2, 'color', col_t);
   plot(1, 0, 'k.', 'markersize', 14);                 % z = 1  <-  s = 0
   text(1.03, 0.12, 'z=1 (s=0)');
@@ -79,9 +70,7 @@ function discretization_plots()
   print(fig, fullfile(outdir, 'pi-disc-splane.png'), '-dpng', '-r110');
 
   % ======================================================================
-  % Fig 3: Bode of the INTEGRATOR and its 3 discrete approximations.
-  % (The integrator is the only dynamic part of the PI; this is where the
-  %  rules differ. Near Nyquist they fan out; at the crossover wc they agree.)
+  % Fig 3: integrator Ki/s vs 3 discrete rules
   % ======================================================================
   w  = logspace(0, log10(wN), 3000);
   s  = 1i*w;
@@ -89,7 +78,7 @@ function discretization_plots()
   Ic = Ki./s;                        % continuous integrator Ki/s
   If = Ki*dt./(z - 1);               % forward  Euler
   Ib = Ki*dt.*z./(z - 1);            % backward Euler
-  It = (Ki*dt/2).*(z + 1)./(z - 1);  % Tustin  (phase stays -90, notch at Nyquist)
+  It = (Ki*dt/2).*(z + 1)./(z - 1);  % Tustin
 
   fig = figure('visible','off','position',[100 100 820 700]);
 
@@ -104,7 +93,7 @@ function discretization_plots()
   ylim(yl); ylabel('|K_i / s|  [dB]'); set(gca,'xscale','log'); xlim([w(1) w(end)]);
   legend('continuous  K_i/s', 'forward Euler', 'backward Euler', 'Tustin', ...
          'location', 'northeast');
-  title('Bode of the integrator: continuous vs discrete (200 Hz)');
+  title('Bode of the integrator: continuous vs discrete (500 Hz)');
 
   subplot(2,1,2); hold on; grid on;
   semilogx(w, angle(Ic)*180/pi, 'linewidth', 3.5, 'color', col_c);
@@ -131,8 +120,8 @@ function discretization_plots()
   N  = round(0.30/dt); td = (0:N-1)*dt;
   w_ = 0; I = 0; wsp = 10; W = zeros(1,N);
   for k = 1:N
-    e  = wsp - w_;                             % (no measurement filter here, to
-    u  = Kp*e + I;                             %  isolate the discretization itself)
+    e  = wsp - w_;
+    u  = Kp*e + I;
     us = max(-1, min(1, u));
     if u == us, I = I + Ki*e*dt; end
     w_ = ad*w_ + bd*us;  W(k) = w_;

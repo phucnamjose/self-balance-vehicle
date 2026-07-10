@@ -41,9 +41,7 @@
     .hint { color: var(--muted); font-size: 12px; }
     .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line2); color: var(--muted); }
 
-    /* Sticky control bar: keeps its buttons/readouts pinned to the top of the
-     * viewport while scrolling through a tall panel. Spans to the card edges and
-     * has a solid background so content scrolls cleanly underneath it. */
+    /* Sticky bar: controls stay pinned while scrolling tall panels. */
     .stickybar {
       position: sticky; top: 8px; z-index: 20;
       background: var(--panel); margin: 0 -12px; padding: 10px 12px;
@@ -370,9 +368,7 @@
     const dot = document.getElementById('dot');
     const input = document.getElementById('in');
 
-    /* This page is hosted on the PC, so it is not served by the ESP32. The
-     * device address is entered in the IP box and remembered between sessions;
-     * the WebSocket and OTA URLs are built from it. */
+    /* PC-hosted page; ESP IP from the box is persisted and used for WS/OTA URLs. */
     let ws = null, retry = null;
     let esp = localStorage.getItem('espIp') || '192.168.4.1';
     const wsUrl  = () => `ws://${esp}/ws`;
@@ -394,8 +390,7 @@
     const f2 = (x) => (Number.isNaN(x) ? '--' : (x >= 0 ? '+' : '') + x.toFixed(2));
     const f1 = (x) => (Number.isNaN(x) ? '--' : (x >= 0 ? '+' : '') + x.toFixed(1));
 
-    /* Each field updates independently so a per-topic frame (which carries only
-     * some of them) refreshes just its own part of the dashboard. */
+    /* Partial telemetry frames update only their own dashboard fields. */
     function setValues(d) {
       if (d.imu_ok !== undefined) {
         if (d.imu_ok) {
@@ -424,27 +419,21 @@
       }
     }
 
-    /* Telemetry batches arrive as packed binary WebSocket frames:
-     *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
-     *   then, per sample: uint64 t_us, followed by (field_count-1) float32 values
-     * The column order and the topic_id -> name mapping below MUST match the
-     * per-topic packers in telemetry.c (telemetry_topic_pack). Column 0 (t) is
-     * always microseconds since boot; other fields are float32 (NaN => empty cell). */
+    /* Binary WS telemetry: [u8 topic][u8 n_fields][u16 n_samples] LE; per sample uint64 t_us + (n_fields-1) float32.
+     * Column order / topic_id map must match telemetry.c; col 0 is t (us), NaN => empty. */
     const TOPIC_BY_ID = ['imu', 'angles', 'motors'];
     const TOPICS = {
       imu:    ['t', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp', 'ok'],
       angles: ['t', 'roll', 'pitch', 'roll_sp', 'pitch_sp'],
       motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR', 'uL', 'uR'],
     };
-    /* Turn one batch row into a flat object keyed by the topic's columns. */
     function rowToObj(cols, row) {
       const o = {};
       for (let i = 0; i < cols.length; i++) o[cols[i]] = row[i];
       return o;
     }
 
-    /* Decode one packed binary batch into { topic, cols, rows } where each row is
-     * a numeric array in the topic's column order (t in us, NaN for empty). */
+    /* Decode packed batch -> { topic, cols, rows }; t in us, NaN = empty. */
     function decodeBatch(buf) {
       const dv = new DataView(buf);
       const topic = TOPIC_BY_ID[dv.getUint8(0)];
@@ -467,7 +456,7 @@
       clearTimeout(retry);
       try { ws = new WebSocket(wsUrl()); }
       catch (e) { add('bad address: ' + esp, 'sys'); return; }
-      ws.binaryType = 'arraybuffer';   /* telemetry batches arrive as binary */
+      ws.binaryType = 'arraybuffer';
       ws.onopen = () => { dot.classList.add('on'); add('connected to ' + esp, 'sys'); };
       ws.onclose = () => { dot.classList.remove('on'); add('disconnected - retrying...', 'sys'); retry = setTimeout(connect, 1500); };
       ws.onmessage = (ev) => {
@@ -500,7 +489,6 @@
       };
     }
 
-    /* Point at a new device address (from the IP box) and reconnect. */
     function reconnect() {
       const v = document.getElementById('ip').value.trim();
       if (v) { esp = v; localStorage.setItem('espIp', esp); }
@@ -510,9 +498,7 @@
       connect();
     }
 
-    /* A telemetry batch carries a topic + rows[] in that topic's column order.
-     * Refresh the matching part of the dashboard from the last row, feed the plot
-     * (all rows), and (if we are recording this topic) append its rows to the CSV. */
+    /* Last row -> dashboard; all rows -> plot; recording topic -> CSV append. */
     function onBinary(buf) {
       const b = decodeBatch(buf);
       if (!b || !b.rows.length) return;
@@ -522,8 +508,7 @@
         setValues({ imu_ok: !!last.ok, ax: last.ax, ay: last.ay, az: last.az,
                     gx: last.gx, gy: last.gy, gz: last.gz, temp: last.temp });
       } else if (topic === 'angles') {
-        /* Firmware pitch estimate (radians -> degrees). NaN while estimation is
-         * off; the page only reads and displays it. */
+        /* Firmware pitch (rad->deg); NaN when estimation off. */
         if (Number.isFinite(last.pitch)) {
           if (!paused) for (const r of rows) {
             const o = rowToObj(cols, r);
@@ -537,8 +522,7 @@
       } else if (topic === 'motors') {
         setValues({ mL: last.mL, mR: last.mR, velL: last.velL, velR: last.velR,
                     velL_sp: last.velL_sp, velR_sp: last.velR_sp });
-        /* While paused, ignore incoming samples entirely - the frozen view is
-         * kept as-is; Reset view (or Resume) drops back to the live series. */
+        /* Paused: freeze view; Reset/Resume resumes live series. */
         if (!paused) {
         for (const r of rows) {
           const o = rowToObj(cols, r);
@@ -550,18 +534,13 @@
       if (recording && topic === recTopic) writeBatch(topic, cols, rows);
     }
 
-    /* ---- live plots (canvas, no libraries) ---- */
+    /* live plots (canvas, no libs) */
     const RETAIN_S = 60;                       /* seconds of history kept in memory */
-    /* Two independent data groups, one per plotting tab: 'motors' feeds the wheel
-     * charts, 'angles' feeds the Angle Estimator chart. Only one plotting tab is
-     * visible at a time, so they share the time-window / pause view state below. */
+    /* motors + angles groups share time-window / pause state (one plotting tab visible). */
     const DATA = { motors: [], angles: [] };
     let drawPending = false;
 
-    /* View state shared by the charts (they share the time axis). winS is the
-     * visible time window; when paused, pausedRightT freezes the right edge so
-     * incoming data no longer scrolls the view. activeSrc is the data group of
-     * the currently visible plotting tab (drives pause/latest-time). */
+    /* Shared view: winS = visible window; pausedRightT freezes right edge when paused. */
     const view = { winS: 10 };
     let paused = false;
     let pausedRightT = 0;
@@ -569,8 +548,7 @@
 
     const PAD = { l: 44, r: 10, t: 10, b: 22 };
 
-    /* Each chart: its series and an optional fixed base y-range. yview, when set
-     * (by shift+scroll or drag), overrides auto-scaling until Reset view. */
+    /* yview (shift+scroll/drag) overrides base/auto y-range until Reset view. */
     const CHARTS = {
       plot:  { id: 'plot',  src: 'motors', base: null, yview: null, series: [
         { key: 'vL',  color: '#6ea8fe', dash: [] },
@@ -587,8 +565,7 @@
       plot3: { id: 'plot3', src: 'angles', base: null, yview: null, series: [
         { key: 'pitch', color: '#3b82f6', dash: [] },
       ] },
-      /* Balance tab: reuse the same data groups (motors + angles both stream in
-       * TEST_BALANCE) across its own canvases. */
+      /* Balance tab: same motors/angles streams, separate canvases. */
       bvel:  { id: 'bvel',  src: 'motors', base: null, yview: null, series: [
         { key: 'vL',  color: '#6ea8fe', dash: [] },
         { key: 'vR',  color: '#f472b6', dash: [] },
@@ -621,7 +598,6 @@
     }
     function clearPlot() { DATA.motors = []; DATA.angles = []; scheduleDraw(); }
 
-    /* Show/hide one series from its legend checkbox. */
     function toggleSeries(chartId, key, on) {
       const chart = CHARTS[chartId];
       if (!chart) return;
@@ -636,8 +612,7 @@
       return { W, H, x0: PAD.l, x1: W - PAD.r, y0: PAD.t, y1: H - PAD.b };
     }
 
-    /* Current y-range for a chart: manual (yview) > fixed base > auto-scale over
-     * the data currently inside the visible time window. */
+    /* y-range: yview > base > auto-scale over visible window. */
     function getRange(chart) {
       if (chart.yview) return chart.yview;
       if (chart.base) return chart.base.slice();
@@ -657,7 +632,6 @@
       const pad = (hi - lo) * 0.1; return [lo - pad, hi + pad];
     }
 
-    /* Keep every tab's pause button label in sync with the shared paused state. */
     function setPauseLabels() {
       const t = paused ? 'Resume' : 'Pause';
       for (const id of ['pausebtn', 'pausebtn3', 'pausebtn4']) {
@@ -676,7 +650,7 @@
     function resetView() {
       view.winS = 10; paused = false;
       DATA.motors = []; DATA.angles = [];   /* back to the live series */
-      /* restore every series to visible + re-check its legend box */
+      /* restore visible series + legend checkboxes */
       for (const c of CHART_LIST) { c.yview = null; for (const s of c.series) s.visible = true; }
       document.querySelectorAll('.legend input[type=checkbox]').forEach((cb) => { cb.checked = true; });
       setPauseLabels();
@@ -702,11 +676,21 @@
       });
     }
 
+    /* ~target divisions across span via 1/2/5 x 10^n grid step. */
+    function niceStep(span, target) {
+      if (!(span > 0)) return 1;
+      const raw = span / target;
+      const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      const n = raw / mag;
+      const step = (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
+      return step;
+    }
+
     function draw(chart) {
       const cv = document.getElementById(chart.id);
       if (!cv) return;
       const { W, H, x0, x1, y0, y1 } = geom(cv);
-      if (!W || !H) return;   /* panel hidden */
+      if (!W || !H) return;
       const dpr = window.devicePixelRatio || 1;
       if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
       const g = cv.getContext('2d');
@@ -719,33 +703,42 @@
       const sx = (t) => x0 + (x1 - x0) * (t - tL) / (tR - tL);
       const sy = (v) => y1 - (y1 - y0) * (v - lo) / (hi - lo);
 
-      /* grid + axis labels (colors follow the theme via CSS variables) */
+      /* grid/axis colors from CSS vars */
       const cs = getComputedStyle(document.body);
       const cGrid = cs.getPropertyValue('--grid').trim() || '#222a35';
       const cAxis = cs.getPropertyValue('--axis').trim() || '#8b96a5';
       const cZero = cs.getPropertyValue('--zero').trim() || '#3a4657';
-      g.strokeStyle = cGrid; g.fillStyle = cAxis;
       g.lineWidth = 1; g.font = '11px monospace'; g.textBaseline = 'middle';
-      const ticks = 4;
-      for (let i = 0; i <= ticks; i++) {
-        const v = lo + (hi - lo) * i / ticks;
+      /* y: nice major step + 5 unlabeled minor lines between. */
+      const yStep = niceStep(hi - lo, 5);
+      const yDec = Math.max(0, Math.min(3, -Math.floor(Math.log10(yStep))));
+      const yMinor = yStep / 5;
+      g.strokeStyle = cGrid; g.globalAlpha = 0.35;
+      for (let v = Math.ceil(lo / yMinor) * yMinor; v <= hi + 1e-9; v += yMinor) {
+        const y = sy(v); g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+      }
+      g.globalAlpha = 1; g.fillStyle = cAxis; g.textAlign = 'right';
+      for (let v = Math.ceil(lo / yStep) * yStep; v <= hi + 1e-9; v += yStep) {
         const y = sy(v);
-        g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
-        g.textAlign = 'right'; g.fillText(v.toFixed(1), x0 - 6, y);
+        g.strokeStyle = cGrid; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+        g.fillText(v.toFixed(yDec), x0 - 6, y);
       }
       if (lo < 0 && hi > 0) {
         g.strokeStyle = cZero; g.beginPath(); g.moveTo(x0, sy(0)); g.lineTo(x1, sy(0)); g.stroke();
       }
-      /* x-axis time scale: vertical grid + labels in seconds relative to the
-       * newest sample (0 = now, negative = older). Tick step adapts to the zoom
-       * so there are ~5 ticks across whatever window is showing. */
+      /* x: seconds relative to newest sample; ~5 ticks, step adapts to zoom. */
       const t0 = latestT(chart.src);
       const STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60];
       let step = STEPS[STEPS.length - 1];
       for (const s of STEPS) { if (s >= view.winS / 5) { step = s; break; } }
       const dec = step < 1 ? 1 : 0;
-      g.textAlign = 'center'; g.textBaseline = 'top';
       const rL = tL - t0, rR = tR - t0;
+      const xMinor = step / 5;
+      g.strokeStyle = cGrid; g.globalAlpha = 0.35;
+      for (let r = Math.ceil(rL / xMinor) * xMinor; r <= rR + 1e-9; r += xMinor) {
+        const X = sx(t0 + r); g.beginPath(); g.moveTo(X, y0); g.lineTo(X, y1); g.stroke();
+      }
+      g.globalAlpha = 1; g.textAlign = 'center'; g.textBaseline = 'top';
       for (let r = Math.ceil(rL / step) * step; r <= rR + 1e-9; r += step) {
         const X = sx(t0 + r);
         g.strokeStyle = cGrid; g.beginPath(); g.moveTo(X, y0); g.lineTo(X, y1); g.stroke();
@@ -777,7 +770,7 @@
       }
     }
 
-    /* ---- mouse zoom / pan ---- */
+    /* mouse zoom / pan */
     function onWheel(e) {
       const chart = CHARTS[e.currentTarget.id];
       if (!chart) return;
@@ -790,13 +783,13 @@
 
       if (e.shiftKey) {                            /* zoom magnitude (this chart) */
         const [lo, hi] = getRange(chart);
-        const frac = (y1 - my) / (y1 - y0);        /* 0 at bottom .. 1 at top */
+        const frac = (y1 - my) / (y1 - y0);
         const vCur = lo + frac * (hi - lo);
         const span = (hi - lo) * f;
         chart.yview = [vCur - frac * span, vCur - frac * span + span];
       } else {                                     /* zoom time (both charts) */
         const tR = rightEdgeT(chart.src);
-        const frac = (x1 - mx) / (x1 - x0);        /* distance from right edge */
+        const frac = (x1 - mx) / (x1 - x0);
         const tCur = tR - frac * view.winS;
         view.winS = Math.min(RETAIN_S, Math.max(0.2, view.winS * f));
         if (paused) pausedRightT = tCur + frac * view.winS;   /* keep cursor time fixed */
@@ -806,7 +799,7 @@
 
     let drag = null;
     function onDown(e) {
-      if (!paused) return;                         /* live view follows now; pan only when paused */
+      if (!paused) return;   /* pan only when paused */
       const chart = CHARTS[e.currentTarget.id];
       const cv = e.currentTarget;
       const { x0, x1, y0, y1 } = geom(cv);
@@ -835,9 +828,7 @@
     window.addEventListener('mouseup', onUp);
     window.addEventListener('resize', scheduleDraw);
 
-    /* ---- Angle Estimator: display the firmware pitch (tilt) + attitude vector ----
-     * pitch is estimated on the ESP32 (topic 'angles', radians); the page only
-     * reads it. Axis conventions: docs/hardware/robot-mechanics.md. */
+    /* Firmware pitch (angles topic, rad); page displays only. Front = right in side view. */
     const R2D = 180 / Math.PI;
     let lastPitchDeg = NaN;   /* newest tilt -> the vector */
 
@@ -851,13 +842,12 @@
       if (bpv) bpv.textContent = Number.isNaN(pitchDeg) ? '--' : f1(pitchDeg);
     }
 
-    /* Attitude view: the body tilt vector (pitch) from upright, side view with the
-     * robot front to the right. Reads the latest lastPitchDeg. */
+    /* Side view: tilt vector from upright; front right. Uses lastPitchDeg. */
     function drawAttitude(id) {
       const cv = document.getElementById(id || 'attitude');
       if (!cv) return;
       const W = cv.clientWidth, H = cv.clientHeight;
-      if (!W || !H) return;                  /* panel hidden */
+      if (!W || !H) return;
       const dpr = window.devicePixelRatio || 1;
       if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
       const g = cv.getContext('2d');
@@ -876,7 +866,7 @@
       g.textAlign = 'center'; g.font = '12px monospace';
 
       for (const p of panels) {
-        g.strokeStyle = cGrid; g.lineWidth = 1;                 /* ground */
+        g.strokeStyle = cGrid; g.lineWidth = 1;
         g.beginPath(); g.moveTo(p.cx - len * 0.85, pivotY); g.lineTo(p.cx + len * 0.85, pivotY); g.stroke();
         g.strokeStyle = cMut; g.setLineDash([5, 5]); g.lineWidth = 1;   /* upright ref */
         g.beginPath(); g.moveTo(p.cx, pivotY); g.lineTo(p.cx, pivotY - len); g.stroke();
@@ -894,10 +884,10 @@
         const rad = ang * Math.PI / 180;
         const tx = p.cx + len * Math.sin(rad);
         const ty = pivotY - len * Math.cos(rad);
-        const a0 = -Math.PI / 2, a1 = -Math.PI / 2 + rad;       /* angle arc */
+        const a0 = -Math.PI / 2, a1 = -Math.PI / 2 + rad;
         g.strokeStyle = cMut; g.lineWidth = 1;
         g.beginPath(); g.arc(p.cx, pivotY, len * 0.32, Math.min(a0, a1), Math.max(a0, a1)); g.stroke();
-        g.strokeStyle = p.color; g.lineWidth = 4; g.lineCap = 'round';   /* body vector */
+        g.strokeStyle = p.color; g.lineWidth = 4; g.lineCap = 'round';
         g.beginPath(); g.moveTo(p.cx, pivotY); g.lineTo(tx, ty); g.stroke();
         g.lineCap = 'butt';
         arrowHead(g, p.cx, pivotY, tx, ty, p.color);
@@ -916,13 +906,10 @@
     }
 
 
-    /* ---- recording the telemetry stream to a CSV file ----
-     * Prefer the File System Access API (streams straight to disk); fall back to
-     * accumulating in memory and downloading when recording stops. */
+    /* CSV recording: File System Access API when available, else in-memory download. */
     let recording = false, fileWriter = null, csvHeader = null, memRows = [], recName = '', recTopic = '';
     const recstat = (t) => { document.getElementById('recstat').textContent = t; };
 
-    /* Build a "topic_YYYYMMDD_HHMMSS.csv" name from the current local time. */
     function recordFilename(topic) {
       const d = new Date();
       const p = (n) => String(n).padStart(2, '0');
@@ -931,8 +918,7 @@
       return `${topic}_${date}_${time}.csv`;
     }
 
-    /* Format one decoded cell for the CSV: t (col 0) is us -> seconds, NaN is an
-     * empty cell, everything else is written to 6 decimal places. */
+    /* CSV cell: col 0 t us->s; NaN => empty; else 6 dp. */
     function fmtCell(topic, j, v) {
       if (j === 0) return (v / 1e6).toFixed(6);   /* t: us -> s */
       if (Number.isNaN(v)) return '';
@@ -1008,7 +994,7 @@
       input.value = '';
     }
 
-    /* ---- panel controls ---- */
+    /* panel controls */
     const mval = document.getElementById('mval');
     mval.addEventListener('input', () => { document.getElementById('mvallbl').textContent = mval.value + '%'; });
     function applyMotor() { send(`motor ${document.getElementById('msel').value} ${mval.value}`); }
@@ -1020,8 +1006,7 @@
       send(`gains l ${g('gkpL')} ${g('gkiL')}`);
       send(`gains r ${g('gkpR')} ${g('gkiR')}`);
     }
-    /* Keep the gain boxes in sync with the firmware's "PI gains: L Kp=.. Ki=..
-     * R Kp=.. Ki=.." report (sent by 'gains', 'gains default' and 'gains <..>'). */
+    /* Sync gain inputs from "PI gains: L Kp=.. Ki=.. R Kp=.. Ki=.." reply. */
     function syncGains(text) {
       const m = text.match(/L Kp=([-\d.]+) Ki=([-\d.]+)\s+R Kp=([-\d.]+) Ki=([-\d.]+)/);
       if (!m) return;
@@ -1031,9 +1016,7 @@
       document.getElementById('gkiR').value = m[4];
     }
 
-    /* Balance PID tuning: send the three gains / trim and keep the boxes in sync
-     * with the firmware's "balance PID: Kp=.. Ki=.. Kd=.. (theta_ref=.. rad)" and
-     * "balance trim theta_ref = .. rad" replies. */
+    /* Balance PID/trim: sync from "balance PID: Kp=.. Ki=.. Kd=.." / theta_ref replies. */
     function applyBGains() {
       const g = (id) => document.getElementById(id).value;
       send(`bgains ${g('bkp')} ${g('bki')} ${g('bkd')}`);
@@ -1049,8 +1032,7 @@
       if (t) { const el = document.getElementById('btrimIn'); if (el && document.activeElement !== el) el.value = parseFloat(t[1]).toFixed(3); }
     }
 
-    /* Angle-estimator filter weight: send the value and keep the box + hint in
-     * sync with the firmware's "estimator alpha=.. (tau=.. s ..)" reply. */
+    /* Alpha: sync from "estimator alpha=.. (tau=.. s ..)" reply. */
     function applyAlpha() { send('alpha ' + document.getElementById('alphaIn').value); }
     function syncAlpha(text) {
       const m = text.match(/estimator alpha=([-\d.]+)/);
@@ -1062,9 +1044,7 @@
       if (h && tau) h.textContent = `\u03c4 = ${tau[1]} s \u2014 higher \u03b1 trusts the gyro more (smoother, slower drift correction).`;
     }
 
-    /* Gyro-bias calibration: fire the command and reflect the firmware's reply
-     * ("gyro calibration started..", "gyro bias set..", "gyro calib aborted..")
-     * in the hint next to the button. */
+    /* Gyrocal: mirror firmware reply in hint. */
     function gyrocal() { send('gyrocal'); }
     function syncGyrocal(text) {
       if (!/gyro (bias set|calib|calibration)/.test(text)) return;
@@ -1072,8 +1052,7 @@
       if (h) h.textContent = text;
     }
 
-    /* ---- tabs. Selecting Manual / Controller also puts the firmware in the
-     * matching experiment mode so the panel's commands actually take effect. ---- */
+    /* Tabs: Manual/Ctrl/Angle also send matching exp mode so commands take effect. */
     const EXP_FOR_TAB = { manual: 'exp motors', ctrl: 'exp motor-ctrl', angle: 'exp angles' };
     const PANELS = ['manual', 'ctrl', 'angle', 'balance', 'flash'];
     function showTab(name) {
@@ -1086,9 +1065,7 @@
           send(EXP_FOR_TAB[name]);
           if (name === 'angle') { send('est on'); send('alpha'); }   /* enable + fetch current alpha */
         } else if (name === 'balance') {
-          /* Enter in a SAFE idle: estimation on (so pitch/attitude show) but the
-           * balance loop OFF so the motors don't move until the operator hits
-           * "Start balancing". Fetch the current gains/trim to fill the boxes. */
+          /* Safe idle: est on for display, balance off until operator starts. */
           send('balance off');
           send('est on');
           send('bgains');
@@ -1129,9 +1106,7 @@
       xhr.send(f);
     }
 
-    /* Send a per-tick motor script (CSV/txt) to the ESP32; it plays back one row
-     * per control tick in TEST_MOTORS. Body is text/plain so the browser skips
-     * the CORS preflight for this simple request. */
+    /* Motor script: one row per control tick; text/plain avoids CORS preflight. */
     function uploadSeq() {
       const f = document.getElementById('seqfile').files[0];
       const stat = document.getElementById('seqstat');
@@ -1151,7 +1126,7 @@
       });
     }
 
-    /* ---- theme (light default, remembered between sessions) ---- */
+    /* theme: light default, persisted */
     function applyTheme(t) {
       document.body.classList.toggle('light', t === 'light');
       localStorage.setItem('theme', t);
@@ -1167,8 +1142,7 @@
     ipBox.value = esp;
     ipBox.addEventListener('keydown', (e) => { if (e.key === 'Enter') reconnect(); });
 
-    /* Restore the last-used tab (without auto-sending an exp command on load:
-     * do the visual switch only, then connect). */
+    /* Restore last tab visually only; connect() sends exp commands later. */
     (function initTab() {
       const name = localStorage.getItem('activeTab') || 'manual';
       document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));

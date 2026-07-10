@@ -1,34 +1,13 @@
-% PI_TUNING_ANALYSIS  Nyquist + Bode and stability margins of the wheel-speed PI loop.
+% PI_TUNING_ANALYSIS  Nyquist + Bode margins for the wheel-speed PI loop.
+% Hand-evaluated L(jw) on a grid (no control package).
+% Plant G=K/(tau*s+1), PI C=Kp+Ki/s (IMC, Ti=tau), plus ZOH delay and meas LPF.
 %
-% Reproduces the figures in pi-tuning.md WITHOUT the Octave control package: it
-% evaluates the open-loop transfer function L(jw) on a frequency grid by hand.
+%   pi_tuning_analysis                      % defaults K=34, tau=0.19
+%   pi_tuning_analysis(K, tau)
+%   pi_tuning_analysis(K, tau, tau_cl)
+%   pi_tuning_analysis(K, tau, tau_cl, tag)  % custom PNG suffix
 %
-% Plant  : G(s)  = K/(tau*s + 1)        (identified motor, see motor-identification.md)
-% PI      : C(s)  = Kp + Ki/s           (gains from the IMC rule, Ti = tau)
-% Extras  : a sample-and-hold + compute delay e^(-s*Td) and a light measurement
-%           low-pass 1/(tau_f*s+1) - the real reasons the loop has finite margins.
-%
-% Usage:
-%   pi_tuning_analysis                      % use identified defaults (K=34, tau=0.19)
-%   pi_tuning_analysis(K, tau)              % your own motor gain / time constant
-%   pi_tuning_analysis(K, tau, tau_cl)      % also pick the closed-loop time constant
-%   pi_tuning_analysis(K, tau, tau_cl, tag) % force a custom output-file suffix
-%
-%   K      - steady-state gain [rad/s per unit duty]   (default 34.0)
-%   tau    - open-loop time constant [s]               (default 0.19)
-%   tau_cl - desired closed-loop time constant [s]     (default tau/5)
-%   tag    - suffix for the PNG filenames              (default: see below)
-%
-% Output files (in this script's folder):
-%   - default parameters  -> pi-tuning-nyquist.png , pi-tuning-bode.png
-%   - custom parameters   -> pi-tuning-nyquist-<tag>.png , pi-tuning-bode-<tag>.png
-%     where <tag> defaults to "K<..>_tau<..>_tcl<..>" so runs never clobber
-%     the committed default figures. Pass `tag` to override the auto name.
-%
-% From the shell:
-%   octave --eval "pi_tuning_analysis(34, 0.19)"
-%   octave --eval "pi_tuning_analysis(50, 0.12, 0.03)"
-%   octave --eval "pi_tuning_analysis(50, 0.12, 0.03, 'fast')"
+% Outputs: pi-tuning-nyquist/bode[(-tag)].png in this folder.
 
 function pi_tuning_analysis(K, tau, tau_cl, tag)
 
@@ -38,22 +17,22 @@ function pi_tuning_analysis(K, tau, tau_cl, tag)
   if nargin < 2 || isempty(tau),    tau = tau0; end   % s
   if nargin < 3 || isempty(tau_cl), tau_cl = tau/5; end % desired closed-loop [s]
 
-  % accept strings too, so "octave --eval" / CLI args work either way
+  % accept string args from CLI
   if ischar(K),      K      = str2double(K);      end
   if ischar(tau),    tau    = str2double(tau);    end
   if ischar(tau_cl), tau_cl = str2double(tau_cl); end
 
-  % ---- output-file suffix: keep base names only for the exact defaults --
+  % PNG suffix: base names only for exact defaults
   is_default = (K == K0) && (tau == tau0) && (abs(tau_cl - tau/5) <= eps(tau));
   if nargin >= 4 && ~isempty(tag)
-    suffix = ['-' tag];                   % explicit user tag
+    suffix = ['-' tag];
   elseif is_default
-    suffix = '';                          % committed figures for the doc
+    suffix = '';
   else
     suffix = sprintf('-K%g_tau%g_tcl%g', K, tau, tau_cl);
   end
 
-  % ---- PI design: pole-zero cancellation / IMC (one knob) --------------
+  % PI: pole-zero cancellation / IMC (Ti = tau)
   Ti = tau;
   Kp = tau / (K * tau_cl);
   Ki = 1   / (K * tau_cl);
@@ -62,9 +41,9 @@ function pi_tuning_analysis(K, tau, tau_cl, tag)
          tau_cl, Kp, Ki, Ti);
 
   % ---- practical lags in the discrete loop ----------------------------
-  dt    = 0.005;                  % 200 Hz control tick
-  Td    = 1.5*dt;                 % ZOH (~0.5 tick) + compute (~1 tick) delay
-  tau_f = 0.008;                  % measurement (encoder-rate) low-pass
+  dt    = 0.002;                  % 500 Hz control tick
+  Td    = 1.5*dt;                 % ZOH (~0.5 tick) + compute (~1 tick)
+  tau_f = 0.02;                   % encoder-rate LPF (WHEEL_PI_TAU_F)
 
   % ---- open-loop frequency response L(jw) -----------------------------
   w  = logspace(-1, 3, 6000);
@@ -76,8 +55,8 @@ function pi_tuning_analysis(K, tau, tau_cl, tag)
   L  = C .* G .* Dl .* Hf;
 
   mag   = abs(L);
-  phdeg = angle(L)*180/pi;        % wrapped phase [deg]
-  phu   = unwrap(angle(L))*180/pi; % unwrapped phase [deg]
+  phdeg = angle(L)*180/pi;
+  phu   = unwrap(angle(L))*180/pi;
 
   % ---- phase margin: at the gain crossover |L| = 1 --------------------
   k  = find(mag(1:end-1) >= 1 & mag(2:end) < 1, 1, 'first');

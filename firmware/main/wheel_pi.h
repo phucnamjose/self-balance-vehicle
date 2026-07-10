@@ -2,15 +2,11 @@
  * @file wheel_pi.h
  * @brief Per-wheel angular-speed PI controller (inner loop of the cascade).
  *
- * One instance per wheel (index 0 = L, 1 = R) regulates that wheel's angular
- * speed to a common setpoint, so the two non-identical motors behave the same to
- * whatever sits above them. Each step adds a model-based feedforward
- * (u_ff = w_set / K) to PI on the speed error, then applies deadband
- * compensation and output saturation, with conditional-integration anti-windup.
- *
- * Design + math: docs/theory/wheel-speed-controller.md and docs/theory/pi-tuning.md.
- * Gains are per-wheel (the two motors are not identical) and default to the
- * values tuned on hardware; override at runtime with wheel_pi_set_gains().
+ * One instance per wheel (0 = L, 1 = R) regulates its speed to a common setpoint
+ * so the two non-identical motors behave the same. Each step adds a feedforward
+ * (u_ff = w_set / K) to PI on the speed error, then deadband compensation and
+ * saturation with conditional-integration anti-windup. Gains are per-wheel,
+ * tuned on hardware; override at runtime with wheel_pi_set_gains().
  */
 #pragma once
 
@@ -47,11 +43,9 @@ bool wheel_pi_deadband(void);
 void wheel_pi_set_ff(bool on);
 bool wheel_pi_ff(void);
 
-/* One control step for wheel @p i (0 = L, 1 = R): given the measured wheel speed
- * @p w_meas (rad/s) and the tick period @p dt (s), return the duty in [-1, +1]
- * to hand to motor_set(). Uses the common setpoint set above. */
+/* One control step for wheel @p i from measured speed @p w_meas (rad/s) and period
+ * @p dt (s): returns the duty in [-1, +1] for motor_set(), using the setpoint above. */
 float wheel_pi_step(int i, float w_meas, float dt);
 
-/* Last raw PI output for wheel @p i (Kp*e + integral), i.e. the command BEFORE
- * deadband compensation and saturation. For analysis/telemetry only. */
+/* Last raw PI output for wheel @p i (before deadband/saturation), for telemetry. */
 float wheel_pi_raw(int i);

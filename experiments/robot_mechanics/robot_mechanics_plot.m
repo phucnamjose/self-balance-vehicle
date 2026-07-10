@@ -1,12 +1,6 @@
-% ROBOT_MECHANICS_PLOT  A labelled illustration of the robot's mechanics for
-% docs/hardware/robot-mechanics.md.
-%
-% Draws two clean, dimensioned views (all lengths in mm, drawn to scale):
-%   - side view  : height, wheel diameter, axle height, CoM, IMU (X front, Z up)
-%   - front view : track width, wheel diameter, IMU (Y left, Z up, X out of page)
-%
-% Base Octave only. Writes one PNG into docs/hardware/.
-%
+% ROBOT_MECHANICS_PLOT  Dimensioned robot illustration for docs/hardware/robot-mechanics.md.
+% Side view (X front, Z up) and front view (Y left, Z up); lengths in mm, to scale.
+% Output: robot-mechanics.png -> docs/hardware/
 % Run:  cd experiments/robot_mechanics && octave --eval robot_mechanics_plot
 
 function robot_mechanics_plot()
@@ -20,7 +14,7 @@ function robot_mechanics_plot()
   D  = 65;    r = D/2;         % wheel diameter / radius
   W  = 190;                    % track (centre-to-centre)
   H  = 120;                    % overall height
-  l  = 52;                     % illustrative CoM height above axle (measure!)
+  l  = 52;                     % CoM height above axle (measure!)
 
   % ---- colours ------------------------------------------------------------
   col_body  = [0.86 0.91 0.98];
@@ -37,9 +31,7 @@ function robot_mechanics_plot()
 
   fig = figure('visible','off','position',[100 100 1200 480]);
 
-  % ======================================================================
-  % SIDE VIEW  (looking at the robot's LEFT side; front = +X = to the right)
-  % ======================================================================
+  % SIDE VIEW (left side; front = +X right)
   subplot(1,2,1); hold on; axis equal; axis off;
 
   bw = 74;                                   % body depth drawn in side view
@@ -69,8 +61,7 @@ function robot_mechanics_plot()
        'markeredgecolor', col_edge, 'linewidth', 1.2);
   text(9, r+l, 'CoM', 'color', col_com, 'fontweight', 'bold');
 
-  % body-axis triad, in the clear space to the RIGHT of the robot
-  % (X front, Z up; Y points out of the page in this view)
+  % body-axis triad (X front, Z up; Y out of page)
   o = [62; 74];
   arrow(o, o+[24;0], ax_x, 2.2); text(o(1)+27, o(2),    'X (front)', 'color', ax_x);
   arrow(o, o+[0;24], ax_z, 2.2); text(o(1)-4,  o(2)+30, 'Z (up)',    'color', ax_z);
@@ -93,9 +84,7 @@ function robot_mechanics_plot()
   title('Side view  (robot''s left side)', 'fontsize', 11);
   xlim([-95 122]); ylim([-18 H+30]);
 
-  % ======================================================================
-  % FRONT VIEW  (looking along +X from the front; +Y = left = screen left)
-  % ======================================================================
+  % FRONT VIEW (+X toward viewer; +Y = screen left)
   subplot(1,2,2); hold on; axis equal; axis off;
 
   % ground
@@ -134,26 +123,26 @@ function robot_mechanics_plot()
 
 end
 
-% ---- rounded rectangle ---------------------------------------------------
+% rounded rectangle
 function roundrect(x, y, w, h, rad, fc, ec, lw)
   rectangle('Position', [x y w h], 'Curvature', [2*rad/w 2*rad/h], ...
             'FaceColor', fc, 'EdgeColor', ec, 'linewidth', lw);
 end
 
-% ---- filled circle -------------------------------------------------------
+% filled circle
 function circle(cx, cy, rad, fc, ec, lw)
   a = linspace(0, 2*pi, 80);
   patch(cx+rad*cos(a), cy+rad*sin(a), fc, 'edgecolor', ec, 'linewidth', lw);
 end
 
-% ---- "out of page" symbol (circle with a centre dot) ---------------------
+% "out of page" symbol
 function ocirc(cx, cy, rad, col)
   a = linspace(0, 2*pi, 40);
   plot(cx+rad*cos(a), cy+rad*sin(a), 'color', col, 'linewidth', 1.6);
   plot(cx, cy, '.', 'color', col, 'markersize', 12);
 end
 
-% ---- vertical dimension line with arrowheads + label ---------------------
+% vertical dimension line
 function dim_v(x, y0, y1, lbl, col)
   plot([x x], [y0 y1], 'color', col, 'linewidth', 1);
   tick(x, y0, 'h', col); tick(x, y1, 'h', col);
@@ -163,7 +152,7 @@ function dim_v(x, y0, y1, lbl, col)
        'horizontalalignment', 'center', 'fontsize', 9);
 end
 
-% ---- horizontal dimension line with arrowheads + label -------------------
+% horizontal dimension line
 function dim_h(x0, x1, y, lbl, col)
   plot([x0 x1], [y y], 'color', col, 'linewidth', 1);
   tick(x0, y, 'v', col); tick(x1, y, 'v', col);
@@ -178,7 +167,7 @@ function tick(x, y, dir, col)
   else,          plot([x x], [y-3 y+3], 'color', col, 'linewidth', 1); end
 end
 
-% ---- arrow (line + head) -------------------------------------------------
+% arrow (line + head)
 function arrow(p0, p1, col, lw)
   p0 = p0(:); p1 = p1(:);
   plot([p0(1) p1(1)], [p0(2) p1(2)], 'color', col, 'linewidth', lw);
@@ -194,7 +183,7 @@ function arrowhead(tip, u, col)
         [tip(2) b(2)+hw*n(2) b(2)-hw*n(2)], col, 'edgecolor', col);
 end
 
-% ---- light ground hatching ----------------------------------------------
+% ground hatching
 function hatch_ground(x0, x1, y, col)
   for xx = x0:12:x1
     plot([xx xx-7], [y y-7], 'color', col, 'linewidth', 0.8);

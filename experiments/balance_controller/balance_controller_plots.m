@@ -1,27 +1,7 @@
 % BALANCE_CONTROLLER_PLOTS  Figures for docs/theory/balance-controller.md.
-%
-% The balance (standing) controller is the OUTER loop of the cascade: it reads
-% the tilt estimate (theta, theta_dot) and drives the wheels to hold the body
-% upright, actively stabilizing the right-half-plane pole of the inverted
-% pendulum. These figures show:
-%   1. it works: recovery from an initial tilt + a mid-run disturbance kick,
-%      next to the open-loop fall it is fighting;
-%   2. why tilt alone is not enough: angle-only PID balances but the cart
-%      drifts, while full-state LQR balances AND returns home;
-%   3. how feedback stabilizes: the open-loop poles (one in the RHP) are dragged
-%      into the left half-plane by the LQR gain;
-%   4. the stabilization condition: the tilt P-gain must exceed a threshold
-%      (it must "beat gravity") before the closed-loop pole crosses into the LHP.
-%
-% The plant + design are reused from ../../simulation (params, plant_dynamics,
-% linearize, lqr_gain) so these figures always match the sim. Base Octave only.
-%
-% Generates four PNGs into docs/theory/ (referenced by balance-controller.md):
-%   balance-recovery.png    - closed-loop recovery + disturbance vs open-loop fall
-%   balance-pid-vs-lqr.png  - angle-only PID drifts; full-state LQR returns home
-%   balance-poles.png       - s-plane: open-loop poles -> LQR closed-loop poles
-%   balance-threshold.png   - rightmost tilt pole vs Kp: the stabilization limit
-%
+% Outer balance loop: tilt -> wheel force; stabilizes the inverted-pendulum RHP pole.
+% Reuses ../../simulation (params, plant_dynamics, linearize, lqr_gain). Base Octave only.
+% Outputs: balance-recovery/pid-vs-lqr/poles/threshold.png -> docs/theory/
 % Run:  cd experiments/balance_controller && octave --eval balance_controller_plots
 
 function balance_controller_plots()
@@ -36,25 +16,25 @@ function balance_controller_plots()
   [A, B]  = linearize(p);
   F_max   = p.n_wheels * p.motor.tau_stall / p.r_wheel;   % force ceiling [N]
 
-  % ---- shared colours (match the other theory figures) --------------------
-  col_ol   = [0.85 0.33 0.10];       % open-loop / unstable (orange)
-  col_cl   = [0.00 0.45 0.74];       % closed-loop / stable (blue)
-  col_lqr  = [0.47 0.16 0.51];       % LQR (purple)
-  col_eff  = [0.20 0.55 0.20];       % effort (green)
+  % ---- shared colours ----------------------------------------------------
+  col_ol   = [0.85 0.33 0.10];
+  col_cl   = [0.00 0.45 0.74];
+  col_lqr  = [0.47 0.16 0.51];
+  col_eff  = [0.20 0.55 0.20];
   col_grey = [0.55 0.55 0.55];
 
-  % ---- angle-only PID gains (force units), from sim_closedloop_pid.m -------
+  % ---- angle-only PID gains (force units) --------------------------------
   Kp = 45.0; Ki = 15.0; Kd = 5.0;
 
   % ======================================================================
-  % Fig 1: it works - closed-loop recovery + disturbance vs open-loop fall
+  % Fig 1: closed-loop recovery + disturbance vs open-loop fall
   % ======================================================================
   dt = 0.001; T = 3.0; N = round(T/dt); t = (0:N)*dt;
   th0 = deg2rad(4);                      % start tilted 4 deg
   t_kick = 1.5; k_kick = round(t_kick/dt);   % a shove at t = 1.5 s
   dw_kick = 3.0;                         % sudden +3 rad/s tilt-rate disturbance
 
-  % closed loop (PID on the nonlinear plant)
+  % closed loop (PID)
   x = [0;0;th0;0]; e_int = 0;
   TH = zeros(1,N+1); FF = zeros(1,N+1); TH(1) = rad2deg(x(3));
   for k = 1:N
@@ -67,7 +47,6 @@ function balance_controller_plots()
     TH(k+1) = rad2deg(x(3)); FF(k+1) = F;
   end
 
-  % open loop (no control) - it just tips over
   xo = [0;0;th0;0]; THO = zeros(1,N+1); THO(1) = rad2deg(xo(3));
   for k = 1:N
     xo = rk4(xo, 0, dt, p);
@@ -100,7 +79,7 @@ function balance_controller_plots()
   save_fig(fig, outdir, 'balance-recovery.png');
 
   % ======================================================================
-  % Fig 2: why tilt alone is not enough - PID drifts, LQR returns home
+  % Fig 2: angle-only PID drifts; full-state LQR returns home
   % ======================================================================
   Q = diag([5, 1, 200, 5]);  R = 0.05;      % LQR weights (lqr_design.m)
   K = lqr_gain(A, B, Q, R);
@@ -145,10 +124,10 @@ function balance_controller_plots()
   save_fig(fig, outdir, 'balance-pid-vs-lqr.png');
 
   % ======================================================================
-  % Fig 3: how feedback stabilizes - open-loop poles dragged into the LHP
+  % Fig 3: open-loop RHP pole dragged into LHP by LQR
   % ======================================================================
-  ol = eig(A);              % open-loop (has a RHP pole)
-  cl = eig(A - B*K);        % LQR closed-loop (all LHP)
+  ol = eig(A);
+  cl = eig(A - B*K);
 
   fig = figure('visible','off','position',[100 100 820 560]);
   hold on; grid on;
@@ -159,11 +138,9 @@ function balance_controller_plots()
   plot([0 0], [-yl yl], 'color', col_grey, 'linewidth', 1.0);   % jw axis
   plot([-xl xl], [0 0], 'color', col_grey, 'linewidth', 1.0);   % real axis
 
-  % arrow (above the axis) showing the RHP pole is pulled left across the jw axis
-  ru = max(real(ol));                       % the unstable open-loop pole (~ +20.6)
+  ru = max(real(ol));
   annotation_arrow(ru, 1.1, -6.4, 1.1, col_lqr);
 
-  % open-loop poles (x), closed-loop poles (o)
   plot(real(ol), imag(ol), 'x', 'color', col_ol,  'markersize', 14, 'linewidth', 3);
   plot(real(cl), imag(cl), 'o', 'color', col_lqr, 'markersize', 11, 'linewidth', 2.5);
 
@@ -181,11 +158,9 @@ function balance_controller_plots()
   save_fig(fig, outdir, 'balance-poles.png');
 
   % ======================================================================
-  % Fig 4: the stabilization condition - tilt P-gain must beat gravity
+  % Fig 4: tilt P-gain must beat gravity (Kp threshold)
   % ======================================================================
-  % Reduced tilt sub-loop [theta; omega] with proportional-derivative feedback
-  % F = Kp_t*theta + Kd_t*omega (positive F for a forward tilt drives the wheels
-  % under the body). Using the linearized tilt row a43,a44 and drive b4:
+  % Reduced tilt sub-loop [theta; omega], F = Kp_t*theta + Kd_t*omega
   a43 = A(4,3); a44 = A(4,4); b4 = B(4);
   Kd_t = 5.0;                             % fix the damping gain
   KpG  = linspace(0, 25, 400);
@@ -194,7 +169,7 @@ function balance_controller_plots()
     Acl = [0 1; a43 + b4*KpG(i), a44 + b4*Kd_t];
     maxre(i) = max(real(eig(Acl)));
   end
-  kp_thr = -a43 / b4;                     % crossing: a43 + b4*Kp = 0
+  kp_thr = -a43 / b4;                     % a43 + b4*Kp = 0 at crossing
 
   fig = figure('visible','off','position',[100 100 780 560]);
   hold on; grid on;

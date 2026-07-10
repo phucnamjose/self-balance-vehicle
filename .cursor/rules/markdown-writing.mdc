@@ -1,0 +1,29 @@
+---
+description: Writing clear, beginner-friendly markdown docs
+globs: **/*.md
+alwaysApply: false
+---
+
+# Writing Markdown Docs
+
+Write for a junior developer or a university research student. Keep it approachable.
+
+## Links & citations
+
+- Do NOT link to or cite other files unless it is truly necessary.
+- Exception: DO link/reference when giving a guide to run code or showing command examples.
+
+## Clarity
+
+- Use plain, adequate wording. Explain jargon the first time it appears.
+- Prefer short paragraphs and lists over dense text.
+
+## Visuals
+
+- Favor visual material to illustrate ideas: diagrams, images, and charts.
+- Use fenced diagrams (e.g. Mermaid) or embedded images `![alt](path)` where they aid understanding.
+
+Bad: `See control.c and estimator.c.` (unnecessary file links + a wall of dense text).
+
+Good: a self-contained explanation paired with a visual, e.g. a Mermaid `flowchart`
+showing Gyro + Accel feeding a fusion step that outputs the tilt angle.

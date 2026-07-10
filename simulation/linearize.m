@@ -1,20 +1,7 @@
 function [A, B] = linearize(p)
-% LINEARIZE  Linear state-space model of the plant about the upright equilibrium.
-%
+% LINEARIZE  x_dot ~= A*x + B*F about upright equilibrium (small x, F=0).
 %   [A, B] = linearize(p)     (p optional; defaults to params())
-%
-% Returns the matrices of the linear approximation
-%
-%       x_dot ~= A * x  +  B * F
-%
-% valid for small deviations from upright (x = 0, F = 0). We obtain A and B by
-% NUMERICAL differentiation (central differences) of plant_dynamics.m, so the
-% linear model always stays consistent with the nonlinear one - change a
-% parameter and both update together.
-%
-% When called with no output arguments (e.g. you just type `linearize`), it also
-% prints an analysis: the open-loop eigenvalues (poles) and a controllability
-% check. Other scripts call it as [A,B] = linearize(p) to get the matrices.
+% A, B via central differences on plant_dynamics.m. No outputs -> prints poles + controllability.
 
   if nargin < 1
     p = params();
@@ -59,7 +46,7 @@ function [A, B] = linearize(p)
       printf('-> all poles stable (unexpected for an inverted pendulum).\n');
     end
 
-    % Controllability: can the single force input steer all 4 states?
+    % Controllability of single force input
     Co = [B, A*B, A*A*B, A*A*A*B];
     r  = rank(Co);
     printf('Controllability matrix rank = %d of %d', r, n);

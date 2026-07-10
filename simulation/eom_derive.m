@@ -1,46 +1,29 @@
-% EOM_DERIVE  Derive the inverted-pendulum-cart equations of motion symbolically.
-%
-% This is a LEARNING / VERIFICATION script. It uses the Lagrangian method to
-% derive the same equations that plant_dynamics.m implements numerically, prints
-% them, and then checks that plant_dynamics.m agrees at a sample state.
-%
-% Needs the symbolic package:  pkg install -forge symbolic   (once), then it is
-% loaded below.
-%
-% Generalized coordinates:  q  = [pos; theta]      (cart position, body tilt)
-% Generalized velocities:   qd = [vel; omega]
-%
-% Geometry (theta measured from the UPWARD vertical, 0 = upright):
-%   cart at (pos, 0);  body CoM at (pos + l*sin(theta),  l*cos(theta)).
+% EOM_DERIVE  Symbolic EOM via Lagrangian; cross-checks plant_dynamics.m.
+% Needs symbolic package. q=[pos;theta], theta from upward vertical (0=upright).
 
 clear; clc;
 pkg load symbolic;
-% Substituting numeric parameters into symbolic expressions triggers a noisy
-% "floating-point values to sym" warning; it is harmless for our cross-check.
+% Suppress harmless "float to sym" warnings during numeric cross-check.
 warning('off', 'all');
 
 syms M m l I g b c F real          % parameters + input force
 syms pos vel th om real            % state: position, velocity, tilt, tilt-rate
 
 % ---- Energies -----------------------------------------------------------
-% CoM velocity components (d/dt of the CoM position, with d(pos)/dt = vel,
-% d(theta)/dt = om):
 xc_dot =  vel + l*cos(th)*om;      % horizontal CoM velocity
 yc_dot =       -l*sin(th)*om;      % vertical   CoM velocity
 
 T = 1/2*M*vel^2 ...                       % cart translation
   + 1/2*m*(xc_dot^2 + yc_dot^2) ...       % body translation
   + 1/2*I*om^2;                           % body rotation
-V = m*g*l*cos(th);                        % gravity PE (max upright -> unstable)
+V = m*g*l*cos(th);                        % gravity PE
 
 T = simplify(T);
 disp('Kinetic energy T ='); pretty(T);
 disp('Potential energy V ='); pretty(V);
 
 % ---- Manipulator form  Mq*qdd = rhs ------------------------------------
-% Rather than carry symbolic time-functions, we assemble the well-known
-% manifold form directly from T and V. The inertia matrix is the Hessian of
-% T with respect to the velocities:
+% Inertia matrix = Hessian of T w.r.t. velocities.
 Mq = [ diff(diff(T,vel),vel), diff(diff(T,vel),om);
        diff(diff(T,om ),vel), diff(diff(T,om ),om) ];
 Mq = simplify(Mq);
@@ -48,9 +31,7 @@ Mq = simplify(Mq);
 % Gravity generalized forces:  -dV/dq
 Gq = [ -diff(V,pos); -diff(V,th) ];        % = [0; m*g*l*sin(th)]
 
-% Velocity (Coriolis/centrifugal) term for this system enters only the cart
-% equation as +m*l*sin(th)*om^2 (from d/dt of the cross term). Build the rhs
-% to match: applied force + gravity + velocity term - damping.
+% Cart equation gets +m*l*sin(th)*om^2 (Coriolis); rhs = force + gravity + vel term - damping.
 rhs = [ F + m*l*sin(th)*om^2 - b*vel;
         Gq(2)                 - c*om ];
 rhs = simplify(rhs);
@@ -62,7 +43,7 @@ qdd = simplify(Mq \ rhs);
 disp('Cart acceleration  vel_dot ='); pretty(qdd(1));
 disp('Angular accel.     om_dot  ='); pretty(qdd(2));
 
-% ---- Numeric cross-check against plant_dynamics.m ----------------------
+% ---- Cross-check vs plant_dynamics.m -----------------------------------
 p = params();
 xtest = [0.0; 0.3; 0.2; -0.4];     % arbitrary [pos vel theta omega]
 Ftest = 1.7;                       % arbitrary force [N]

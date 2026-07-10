@@ -2,26 +2,19 @@
 
 #include <math.h>
 
-/* Default PID gains (SEEDS - tune on hardware). The outer balance loop outputs a
- * wheel-speed command, so its gains are in "rad/s of wheel speed per rad of
- * tilt" (Kp), "... per rad*s" (Ki) and "... per rad/s" (Kd) - a different unit
- * base than the sim's force-based study (docs/theory/balance-controller.md),
- * which is why these start as conservative seeds rather than a bench-identified
- * fit. Bring-up: raise Kp until it holds and just starts to buzz, add Kd to damp
- * the buzz, then a little Ki to remove residual lean.
- *   Kp = 150  rad/s per rad     (~3 deg lean -> ~8 rad/s of drive)
- *   Ki = 300  rad/s per rad*s
- *   Kd = 12   rad/s per rad/s */
-#define BALANCE_KP_DEFAULT   150.0f
-#define BALANCE_KI_DEFAULT   300.0f
-#define BALANCE_KD_DEFAULT   12.0f
+/* Default PID gains (seeds - tune on hardware). The outer loop outputs a wheel-speed
+ * command, so gains are in rad/s-of-speed per rad tilt (Kp), per rad*s (Ki), per
+ * rad/s (Kd). Bring-up: raise Kp until it buzzes, add Kd to damp, then a little Ki. */
+#define BALANCE_KP_DEFAULT   60.00f
+#define BALANCE_KI_DEFAULT   500.00f
+#define BALANCE_KD_DEFAULT   8.00f
 
-/* Integral-state clamp [rad/s]. Bounded at the output ceiling so a persistent
- * lean can still call on full drive authority, but no more. */
+/* Integral-state clamp [rad/s], at the output ceiling: a persistent lean can call
+ * on full drive authority but no more. */
 #define BALANCE_I_MAX        BALANCE_W_MAX
 
-/* Gains + setpoint are written from the web task (core 0) and read by the
- * control loop (core 1); volatile keeps the reads honest across cores. */
+/* Gains + setpoint: written by the web task (core 0), read by the control loop
+ * (core 1); volatile keeps cross-core reads honest. */
 static volatile float s_kp        = BALANCE_KP_DEFAULT;
 static volatile float s_ki        = BALANCE_KI_DEFAULT;
 static volatile float s_kd        = BALANCE_KD_DEFAULT;
@@ -67,9 +60,8 @@ float balance_pid_step(float theta, float theta_dot, float dt)
     if (u_sat >  BALANCE_W_MAX) u_sat =  BALANCE_W_MAX;
     if (u_sat < -BALANCE_W_MAX) u_sat = -BALANCE_W_MAX;
 
-    /* Conditional-integration anti-windup: don't wind the integrator further in
-     * the direction that is already saturating the output; still allow it to
-     * unwind. Clamp the state as a second line of defence. */
+    /* Conditional-integration anti-windup: don't wind further into the saturating
+     * direction, but allow unwinding. Clamp the state as a second line of defence. */
     bool pushing_high = (u > u_sat) && (e > 0.0f);
     bool pushing_low  = (u < u_sat) && (e < 0.0f);
     if (!pushing_high && !pushing_low) {

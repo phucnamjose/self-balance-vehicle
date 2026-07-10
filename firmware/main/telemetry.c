@@ -58,17 +58,11 @@ int telemetry_latest_json(char *buf, size_t len, const char *type)
 }
 
 /* ============================== topics ==================================
- * Each topic is a projection of sample_t packed into a compact binary frame:
- *
- *   [u8 topic_id][u8 field_count][u16 sample_count]   (little-endian)
- *   then, per sample: uint64 t_us, followed by (field_count-1) float32 values
- *
- * All multi-byte values are little-endian (matches the ESP32 and the browser's
- * DataView with littleEndian=true). Column 0 is always the timestamp as a
- * uint64 count of microseconds since boot (full esp_timer resolution); the rest
- * are float32. Fields not produced yet (orientation estimate, control setpoints)
- * are packed as NaN, which the client renders as empty CSV cells. The per-topic
- * column order below is the contract the client decoder must mirror. */
+ * Each topic packs a projection of sample_t into a little-endian binary frame:
+ *   [u8 topic_id][u8 field_count][u16 sample_count]
+ *   then, per sample: uint64 t_us (col 0), then (field_count-1) float32 values.
+ * Not-yet-produced fields are packed as NaN. The per-topic column order below is
+ * the contract the client decoder must mirror. */
 static inline uint8_t *put_u32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)v;  p[1] = (uint8_t)(v >> 8);
@@ -120,9 +114,8 @@ static int pack_angles(uint8_t *b, const sample_t *s)
 }
 
 /* motors: [ t(us), velL, velR, velL_sp, velR_sp, mL, mR, uL, uR ]
- *   velL,velR  rad/s (measured)   *_sp  per-wheel rad/s setpoint (NaN when open
- *   loop)   mL,mR  applied duty -1..+1   uL,uR  raw PI output pre-deadband/sat
- *   (NaN when open loop) */
+ *   vel* rad/s measured   *_sp rad/s setpoint   mL,mR duty -1..+1   uL,uR raw PI
+ *   output pre-deadband/sat. Setpoints and u* are NaN when open loop. */
 static int pack_motors(uint8_t *b, const sample_t *s)
 {
     uint8_t *p = put_t(b, s);

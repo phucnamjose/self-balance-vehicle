@@ -27,10 +27,8 @@ static volatile bool    s_stream_enabled = true;  /* toggle telemetry streaming 
 
 bool web_server_streaming(void) { return s_stream_enabled; }
 
-/* The control UI now runs as a separate web app on the operator's PC and
- * connects here over WebSocket, so it is served from a different origin. Allow
- * cross-origin reads/uploads on the HTTP endpoints. (WebSocket is exempt from
- * CORS, so /ws needs nothing.) */
+/* The control UI is a separate web app on the operator's PC (different origin),
+ * so allow cross-origin reads/uploads on the HTTP endpoints. (/ws is CORS-exempt.) */
 static void set_cors(httpd_req_t *req)
 {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -96,14 +94,11 @@ static void reply_experiment(httpd_req_t *req)
     ws_reply(req, msg);
 }
 
-/* Interpret a text command from the terminal. Add new commands here as the
- * project grows (later: set gains, change PWM, start/stop, etc.). */
+/* Interpret a text command from the terminal. Add new commands here. */
 static void handle_command(httpd_req_t *req, const char *cmd)
 {
     if (strcmp(cmd, "help") == 0) {
-        /* Multi-line guide. Newlines are embedded as the two-char JSON escape
-         * (\\n) so the reply stays valid JSON and the client renders line breaks.
-         * Built in a local buffer because it is longer than ws_reply's. */
+        /* Newlines are the two-char JSON escape (\\n) so the reply stays valid JSON. */
         static const char help[] =
             "Balance Bot terminal.\\n"
             "Bring-up: control start -> exp motor-ctrl -> speed <rad/s>, then "
@@ -155,9 +150,8 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         control_set_estimation(false);
         reply_experiment(req);
     } else if (strncmp(cmd, "alpha", 5) == 0) {
-        /* Tilt-estimator complementary-filter weight: "alpha 0.98" sets it,
-         * "alpha" alone reports. Higher alpha trusts the gyro more (less accel
-         * noise, slower drift correction). tau = alpha*dt/(1-alpha) at the tick. */
+        /* Estimator filter weight: "alpha 0.98" sets, "alpha" reports. Higher trusts
+         * the gyro more. tau = alpha*dt/(1-alpha). */
         float a;
         if (sscanf(cmd + 5, "%f", &a) == 1) {
             estimator_set_alpha(a);
@@ -176,8 +170,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         control_set_controller(false);
         reply_experiment(req);
     } else if (strcmp(cmd, "balance on") == 0) {
-        /* The outer balance loop needs the tilt estimate and the inner
-         * wheel-speed loop under it; turn both on so 'balance on' alone works. */
+        /* The balance loop needs the estimator + inner wheel loop, so turn both on. */
         control_set_estimation(true);
         control_set_controller(true);
         control_set_balance(true);
@@ -190,8 +183,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "balance") == 0) {
         reply_experiment(req);
     } else if (strncmp(cmd, "bgains", 6) == 0) {
-        /* Tune the balance PID live: "bgains <kp> <ki> <kd>", "bgains default"
-         * to restore the compiled seeds, or no args to report. */
+        /* Live balance PID: "bgains <kp> <ki> <kd>", "bgains default", or none to report. */
         char which[8] = { 0 };
         float kp, ki, kd;
         int n = sscanf(cmd + 6, "%7s", which);
@@ -207,8 +199,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
                  (double)balance_pid_kd(), (double)balance_pid_setpoint());
         ws_reply(req, msg);
     } else if (strncmp(cmd, "btrim", 5) == 0) {
-        /* Upright trim: the tilt setpoint the balancer holds (rad). "btrim 0.01"
-         * leans it slightly; "btrim" reports the current value. */
+        /* Upright trim: the tilt setpoint the balancer holds (rad). "btrim" reports. */
         float t;
         if (sscanf(cmd + 5, "%f", &t) == 1) {
             balance_pid_set_setpoint(t);
@@ -221,8 +212,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         control_deadband_stop();
         ws_reply(req, "deadband sweep stopped, motors parked");
     } else if (strcmp(cmd, "deadband") == 0) {
-        /* Slow ramp to find each wheel's start-moving duty; needs the open-loop
-         * motor test (same gate as the motor sequence uploader). */
+        /* Slow ramp to find each wheel's start-moving duty; needs TEST_MOTORS. */
         if (control_mode() != START_CONTROL ||
             control_estimation_enabled() || control_controller_enabled()) {
             ws_reply(req, "deadband needs START_CONTROL + TEST_MOTORS "
@@ -233,9 +223,8 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         ws_reply(req, "deadband sweep started: ramping 0->15% forward then reverse, "
                       "result follows in a few seconds...");
     } else if (strcmp(cmd, "gyrocal") == 0) {
-        /* Average the gyro at rest and store the zero-rate bias. The IMU is only
-         * read while the control loop runs, so the task must be started; the
-         * robot must be held still (any orientation) for ~2 s. */
+        /* Average the gyro at rest and store the zero-rate bias. Needs the control
+         * task running and the robot held still (~2 s, any orientation). */
         if (control_mode() != START_CONTROL) {
             ws_reply(req, "gyrocal needs the control task running (send 'control start')");
             return;
@@ -288,9 +277,8 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         snprintf(msg, sizeof(msg), "motor %s = %d%%", which, pct);
         ws_reply(req, msg);
     } else if (strncmp(cmd, "speed", 5) == 0) {
-        /* Per-wheel speed setpoint (rad/s): "speed l 10", "speed r -5",
-         * "speed both 8". Only has an effect with the controller enabled
-         * (exp motor-ctrl / ctrl on). */
+        /* Per-wheel speed setpoint (rad/s), e.g. "speed both 8". Only acts with the
+         * controller enabled. */
         char which[8];
         float w;
         if (sscanf(cmd + 5, "%7s %f", which, &w) != 2) {
@@ -319,9 +307,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
                      " (controller OFF - send 'ctrl on' or 'exp motor-ctrl')");
         ws_reply(req, msg);
     } else if (strncmp(cmd, "gains", 5) == 0) {
-        /* Tune the PI gains live: "gains <l|r|both> <kp> <ki>", or restore the
-         * compiled defaults with "gains default". No args (or an unrecognized
-         * wheel) just reports the current per-wheel gains. */
+        /* Live PI gains: "gains <l|r|both> <kp> <ki>", "gains default", or none to report. */
         char which[8];
         float kp, ki;
         int n = sscanf(cmd + 5, "%7s %f %f", which, &kp, &ki);
@@ -360,10 +346,8 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "ff") == 0) {
         ws_reply(req, wheel_pi_ff() ? "feedforward is ON" : "feedforward is OFF");
     } else if (strcmp(cmd, "stop") == 0) {
-        /* Motor-test stop: just zero the outputs. The control task keeps running
-         * (this is NOT STOP_CONTROL); a new motor command re-enables movement.
-         * Also parks the wheel-speed setpoint so a re-enabled controller starts
-         * from rest rather than lunging to a stale target. */
+        /* Motor-test stop: zero the outputs (task keeps running, not STOP_CONTROL).
+         * Also park the wheel setpoint so a re-enabled controller starts from rest. */
         motor_cmd_set(0, 0.0f);
         motor_cmd_set(1, 0.0f);
         wheel_pi_set_setpoint(0, 0.0f);
@@ -376,9 +360,8 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         control_set_mode(START_CONTROL);
         ws_reply(req, "START_CONTROL: control task running");
     } else if (strcmp(cmd, "rollback") == 0) {
-        /* Switch boot to the other OTA slot (the image we ran before the last
-         * upload) and reboot. esp_ota_set_boot_partition validates the slot, so
-         * if it's empty (never flashed) we fail gracefully instead of bricking. */
+        /* Boot the other OTA slot and reboot. set_boot_partition validates it, so an
+         * empty slot fails gracefully instead of bricking. */
         const esp_partition_t *running = esp_ota_get_running_partition();
         const esp_partition_t *other   = esp_ota_get_next_update_partition(NULL);
         if (other == NULL || other == running) {
@@ -404,8 +387,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "stats") == 0) {
         char json[512];
         int n = telemetry_latest_json(json, sizeof(json), "resp_stats");
-        /* Splice the current modes in before the closing brace so a single
-         * 'stats' shows both the loop numbers and what the loop is running. */
+        /* Splice the current modes in before the closing brace. */
         if (n > 0 && n < (int)sizeof(json) && json[n - 1] == '}') {
             snprintf(json + n - 1, sizeof(json) - (n - 1),
                      ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d,\"bal\":%d,"
@@ -456,20 +438,17 @@ static esp_err_t ws_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* One queued WebSocket message: a length + frame type followed inline by the
- * payload bytes (so text and binary share the same path; binary may contain NUL
- * so we can't rely on strlen). Allocated by ws_enqueue, freed by ws_async_send. */
+/* One queued WebSocket message: length + type, with the payload bytes inline
+ * (text and binary share one path). Allocated by ws_enqueue, freed by ws_async_send. */
 typedef struct {
     size_t                len;
     httpd_ws_type_t       type;
     /* payload bytes follow immediately after this header */
 } ws_msg_t;
 
-/* Runs in the HTTP server task (scheduled via httpd_queue_work). Sends the
- * message to every WS client. The actual socket send blocks here, NOT in
- * reporter_task, so a slow/laggy client can't stall telemetry or logging. A
- * client whose send fails is dropped so it reconnects fresh instead of wedging
- * future sends. @p arg is a malloc'd ws_msg_t (+payload) that we free here. */
+/* Runs in the HTTP server task (via httpd_queue_work): sends the message to every
+ * WS client. The socket send blocks here, not in reporter_task, so a slow client
+ * can't stall telemetry; a failed send drops that client. Frees @p arg. */
 static void ws_async_send(void *arg)
 {
     ws_msg_t *msg = (ws_msg_t *)arg;
@@ -520,19 +499,16 @@ void ws_broadcast_bin(const void *data, size_t len)
 
 /* ===================== OTA: wireless firmware upload ===================== */
 
-/* Browser POSTs the raw .bin to /ota. We stream it straight into the *other*
- * app slot (esp_ota_get_next_update_partition), validate it, then flip the boot
- * partition and reboot. The currently running image is never touched, so a bad
- * upload can't brick the board - on failure we just don't switch slots. */
+/* Browser POSTs the raw .bin to /ota. We stream it into the other app slot,
+ * validate, then flip the boot partition and reboot. The running image is never
+ * touched, so a bad upload can't brick the board. */
 #define OTA_RECV_BUF 1024
 
 static esp_err_t ota_post_handler(httpd_req_t *req)
 {
-    /* Safety gate: only flash in STOP_CONTROL, where the control task is fully
-     * stopped and the motors are parked. Send the refusal as a normal CORS
-     * response (not httpd_resp_send_err) so the cross-origin web app can actually
-     * read the 403 status and message. On a failed flash the task stays stopped;
-     * the operator brings it back explicitly with 'control start'. */
+    /* Safety gate: only flash in STOP_CONTROL (task stopped, motors parked). The
+     * refusal is a normal CORS response (not send_err) so the cross-origin app can
+     * read the 403 status and message. */
     if (control_mode() != STOP_CONTROL) {
         ESP_LOGW(TAG, "OTA refused: control task is running");
         set_cors(req);
@@ -623,17 +599,13 @@ static esp_err_t ota_options_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
-/* Upper bound on the uploaded sequence text. 4000 ticks * ~24 chars/line leaves
- * generous room; refuse anything larger so a bad request can't exhaust the heap. */
+/* Upper bound on the uploaded sequence text; refuse larger so a bad request can't
+ * exhaust the heap. */
 #define SEQ_MAX_BODY  (96 * 1024)
 
-/* POST /motorseq - import a step-based open-loop motor script and play it.
- *
- * Body is plain text, one step per line: "dur,mL,mR" (comma or whitespace
- * separated) where dur is how long to hold that output in seconds (> 0) and
- * mL,mR are in -1..+1. Blank lines and lines starting with '#' are ignored.
- * Only allowed in START_CONTROL + TEST_MOTORS (estimation and controller both
- * off); the loop then applies each step for its duration, then parks. */
+/* POST /motorseq - import + play a step-based open-loop motor script. Body is plain
+ * text, one step per line "dur,mL,mR" (dur > 0 s, mL,mR in -1..+1); blank/# lines are
+ * ignored. Only in START_CONTROL + TEST_MOTORS; the loop plays each step, then parks. */
 static esp_err_t motorseq_post_handler(httpd_req_t *req)
 {
     if (control_mode() != START_CONTROL ||
@@ -728,8 +700,8 @@ void start_webserver(void)
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     /* OTA writes flash from inside the server task; give it a bigger stack. */
     cfg.stack_size = 8192;
-    /* Fail a stuck send fast (default ~5 s) so the server task recovers quickly
-     * if a client's link goes bad; and reclaim the oldest socket when full. */
+    /* Fail a stuck send fast so the server recovers if a client's link goes bad;
+     * reclaim the oldest socket when full. */
     cfg.send_wait_timeout = 2;
     cfg.lru_purge_enable  = true;
     ESP_ERROR_CHECK(httpd_start(&s_httpd, &cfg));
