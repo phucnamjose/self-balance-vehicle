@@ -3,7 +3,7 @@ function R = motor_id(csvfile)
 %   R = motor_id()            default recording under experiments/
 %   R = motor_id(csvfile)     given 'motors' topic CSV
 %
-% CSV columns (header-matched): t, velL, velR, velL_sp, velR_sp, mL, mR, uL, uR
+% CSV columns (header-matched): t, velL, velR, velL_sp, velR_sp, mL, mR, rawL, rawR
 % velL/R [rad/s], mL/R PWM duty [-1..+1]. vel*_sp/u* ignored during open-loop ID.
 %
 % Model per wheel: tau*dw/dt + w = K*u  <=>  G(s) = K/(tau*s+1)

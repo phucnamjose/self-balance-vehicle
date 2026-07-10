@@ -31,8 +31,8 @@
 #define DT_MIN_WARN_US (CONTROL_PERIOD_US - DT_JITTER_MARGIN_US)
 
 /* Compute-budget limit: how long the tick's WORK takes (vs the period above). Warn
- * once it exceeds 90% of the period (1.8 ms at 500 Hz), or the next tick starts late. */
-#define RUN_WARN_US    (CONTROL_PERIOD_US * 9 / 10)                  /* 90% */
+ * once it exceeds 95% of the period (1.9 ms at 500 Hz), or the next tick starts late. */
+#define RUN_WARN_US    (CONTROL_PERIOD_US * 95 / 100)                  /* 90% */
 
 /* One IMU sample in physical units. */
 typedef struct {
@@ -49,7 +49,7 @@ typedef struct {
     float   velL, velR;    /* wheel angular speed, rad/s */
     float   roll, pitch;   /* orientation estimate, rad (NaN when estimation off) */
     float   wsetL, wsetR;  /* per-wheel speed setpoint, rad/s (NaN when open loop) */
-    float   uL, uR;        /* raw PI output pre-deadband/sat (NaN when open loop) */
+    float   rawL, rawR;        /* raw PI output pre-deadband/sat (NaN when open loop) */
     float   mL, mR;        /* commanded motor effort, -1..+1 */
     imu_t   imu;           /* latest IMU sample */
 } sample_t;

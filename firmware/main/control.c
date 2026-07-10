@@ -361,7 +361,7 @@ static void control_task(void *arg)
          * ('stop' only zeroes the open-loop command; STOP_CONTROL deletes the task.) */
         float cmdL, cmdR;
         float wsetL = NAN, wsetR = NAN;   /* setpoints for telemetry (NaN when open loop) */
-        float uL = NAN, uR = NAN;         /* raw PI output pre-deadband/sat (NaN when open loop) */
+        float rawL = NAN, rawR = NAN;         /* raw PI output pre-deadband/sat (NaN when open loop) */
         if (s_ctrl_enabled) {
             /* Rising edge into closed loop: clear integrators/filters for a clean start. */
             if (!ctrl_was) wheel_pi_reset();
@@ -418,8 +418,8 @@ static void control_task(void *arg)
                 wsetR = wheel_pi_setpoint(1);
                 cmdL = wheel_pi_step(0, velL, dt);
                 cmdR = wheel_pi_step(1, velR, dt);
-                uL = wheel_pi_raw(0);
-                uR = wheel_pi_raw(1);
+                rawL = wheel_pi_raw(0);
+                rawR = wheel_pi_raw(1);
             }
         } else if (s_db_active) {
             /* Deadband sweep takes priority over playback/manual while running. */
@@ -462,8 +462,8 @@ static void control_task(void *arg)
         smp->pitch = pitch;
         smp->wsetL = wsetL;
         smp->wsetR = wsetR;
-        smp->uL   = uL;
-        smp->uR   = uR;
+        smp->rawL   = rawL;
+        smp->rawR   = rawR;
         smp->mL   = cmdL;
         smp->mR   = cmdR;
         smp->imu  = imu;

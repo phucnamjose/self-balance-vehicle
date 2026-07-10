@@ -223,8 +223,8 @@
       <div class="legend">
         <label><input type="checkbox" checked onchange="toggleSeries('plot2','mL',this.checked)"><i class="swatch" style="background:#34d399"></i>motor L</label>
         <label><input type="checkbox" checked onchange="toggleSeries('plot2','mR',this.checked)"><i class="swatch" style="background:#fbbf24"></i>motor R</label>
-        <label><input type="checkbox" checked onchange="toggleSeries('plot2','uL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #34d399"></i>raw L</label>
-        <label><input type="checkbox" checked onchange="toggleSeries('plot2','uR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #fbbf24"></i>raw R</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot2','rawL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #34d399"></i>raw L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('plot2','rawR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #fbbf24"></i>raw R</label>
         <span style="flex:1"></span>
         <button class="ghost" id="pausebtn" onclick="togglePause()">Pause</button>
         <button class="ghost" onclick="resetView()">Reset view</button>
@@ -329,8 +329,8 @@
     <div class="legend">
       <label><input type="checkbox" checked onchange="toggleSeries('bout','mL',this.checked)"><i class="swatch" style="background:#34d399"></i>motor L</label>
       <label><input type="checkbox" checked onchange="toggleSeries('bout','mR',this.checked)"><i class="swatch" style="background:#fbbf24"></i>motor R</label>
-      <label><input type="checkbox" checked onchange="toggleSeries('bout','uL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #34d399"></i>raw L</label>
-      <label><input type="checkbox" checked onchange="toggleSeries('bout','uR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #fbbf24"></i>raw R</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bout','rawL',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #34d399"></i>raw L</label>
+      <label><input type="checkbox" checked onchange="toggleSeries('bout','rawR',this.checked)"><i class="swatch" style="background:transparent; height:0; border-top:2px dashed #fbbf24"></i>raw R</label>
       <span style="flex:1"></span>
       <button class="ghost" id="pausebtn4" onclick="togglePause()">Pause</button>
       <button class="ghost" onclick="resetView()">Reset view</button>
@@ -425,7 +425,7 @@
     const TOPICS = {
       imu:    ['t', 'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp', 'ok'],
       angles: ['t', 'roll', 'pitch', 'roll_sp', 'pitch_sp'],
-      motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR', 'uL', 'uR'],
+      motors: ['t', 'velL', 'velR', 'velL_sp', 'velR_sp', 'mL', 'mR', 'rawL', 'rawR'],
     };
     function rowToObj(cols, row) {
       const o = {};
@@ -526,7 +526,7 @@
         if (!paused) {
         for (const r of rows) {
           const o = rowToObj(cols, r);
-          pushPlot(o.t / 1e6, o.velL, o.velR, o.velL_sp, o.velR_sp, o.mL, o.mR, o.uL, o.uR);
+          pushPlot(o.t / 1e6, o.velL, o.velR, o.velL_sp, o.velR_sp, o.mL, o.mR, o.rawL, o.rawR);
         }
           scheduleDraw();
         }
@@ -559,8 +559,8 @@
       plot2: { id: 'plot2', src: 'motors', base: null, yview: null, series: [
         { key: 'mL', color: '#34d399', dash: [] },
         { key: 'mR', color: '#fbbf24', dash: [] },
-        { key: 'uL', color: '#34d399', dash: [5, 4] },
-        { key: 'uR', color: '#fbbf24', dash: [5, 4] },
+        { key: 'rawL', color: '#34d399', dash: [5, 4] },
+        { key: 'rawR', color: '#fbbf24', dash: [5, 4] },
       ] },
       plot3: { id: 'plot3', src: 'angles', base: null, yview: null, series: [
         { key: 'pitch', color: '#3b82f6', dash: [] },
@@ -574,8 +574,8 @@
       bout:  { id: 'bout',  src: 'motors', base: null, yview: null, series: [
         { key: 'mL', color: '#34d399', dash: [] },
         { key: 'mR', color: '#fbbf24', dash: [] },
-        { key: 'uL', color: '#34d399', dash: [5, 4] },
-        { key: 'uR', color: '#fbbf24', dash: [5, 4] },
+        { key: 'rawL', color: '#34d399', dash: [5, 4] },
+        { key: 'rawR', color: '#fbbf24', dash: [5, 4] },
       ] },
       bpitch: { id: 'bpitch', src: 'angles', base: null, yview: null, series: [
         { key: 'pitch', color: '#3b82f6', dash: [] },
@@ -584,9 +584,9 @@
     const CHART_LIST = [CHARTS.plot, CHARTS.plot2, CHARTS.plot3,
                         CHARTS.bvel, CHARTS.bout, CHARTS.bpitch];
 
-    function pushPlot(t, vL, vR, spL, spR, mL, mR, uL, uR) {
+    function pushPlot(t, vL, vR, spL, spR, mL, mR, rawL, rawR) {
       const d = DATA.motors;
-      d.push({ t, vL, vR, spL, spR, mL, mR, uL, uR });
+      d.push({ t, vL, vR, spL, spR, mL, mR, rawL, rawR });
       const tmin = t - RETAIN_S;
       while (d.length && d[0].t < tmin) d.shift();
     }
