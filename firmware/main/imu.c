@@ -109,15 +109,22 @@ static esp_err_t mpu_read_regs(uint8_t reg, uint8_t *dst, size_t n)
 
 bool mpu6050_init(void)
 {
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = MPU6050_ADDR,
-        .scl_speed_hz    = I2C_FREQ_HZ,
-    };
-    if (i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_mpu) != ESP_OK) {
-        ESP_LOGE(TAG, "MPU6050: failed to add device at 0x%02X", MPU6050_ADDR);
-        return false;
+    /* Idempotent for retry: add the bus device only once (a second add of the same
+     * address fails), then re-probe and re-configure on every call. */
+    if (s_mpu == NULL) {
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address  = MPU6050_ADDR,
+            .scl_speed_hz    = I2C_FREQ_HZ,
+        };
+        if (i2c_master_bus_add_device(s_i2c_bus, &dev_cfg, &s_mpu) != ESP_OK) {
+            ESP_LOGE(TAG, "MPU6050: failed to add device at 0x%02X", MPU6050_ADDR);
+            s_mpu = NULL;
+            return false;
+        }
     }
+
+    s_mpu_ok = false;   /* clear until this attempt fully succeeds */
 
     uint8_t who = 0;
     if (mpu_read_regs(MPU_REG_WHO_AM_I, &who, 1) != ESP_OK) {

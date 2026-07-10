@@ -39,6 +39,9 @@ static const char *TAG = "control";
 #define BALANCE_DIV    (CONTROL_HZ / BALANCE_HZ)
 _Static_assert(CONTROL_HZ % BALANCE_HZ == 0, "BALANCE_HZ must divide CONTROL_HZ exactly");
 
+/* Consecutive failed IMU reads that mean it is gone (~200 ms at 500 Hz), not a blip. */
+#define IMU_FAIL_LIMIT 100
+
 /* Scratch buffer for one packed telemetry frame, derived from SAMPLES_PER_BATCH so
  * it tracks CONTROL_HZ (a fixed size overflowed at 500 Hz and dropped topics).
  * Keep REPORT_FRAME_MAX_FIELDS >= the widest topic's field count. +64 B slack. */
@@ -70,12 +73,15 @@ static volatile uint32_t s_warn_run_count; /* overruns since the last report */
  * call (I2C), so time it separately. s_imu_stale_count counts failed reads. */
 static volatile int32_t  s_warn_imu_us;      /* worst IMU-read time in the window */
 static volatile uint32_t s_imu_stale_count;  /* failed/timed-out reads (held last) */
+static volatile bool     s_imu_lost_evt;     /* set when the IMU is dropped; reporter broadcasts it */
 
 /* Control-task lifecycle: STOP_CONTROL deletes the task and parks the motors;
  * START_CONTROL re-creates it. The GPTimer/peripherals are set up once and reused. */
 static volatile control_mode_t s_mode = STOP_CONTROL;  /* set to START by control_start() */
 static gptimer_handle_t  s_timer;        /* created once, kept across stop/start */
 static bool              s_periph_ready; /* peripherals init'd once, on first start */
+static bool              s_imu_present;   /* mpu6050_init() succeeded; if false we never
+                                           * touch the I2C bus and balance stays disabled */
 static volatile bool     s_stop_req;     /* ask the loop to exit at a safe point */
 
 /* Research feature flags, read every tick. Default (all off) is a plain open-loop
@@ -260,12 +266,20 @@ static void control_task(void *arg)
     if (!s_periph_ready) {
         encoder_init();   /* PCNT quadrature counters, count from 0 */
         motor_init();     /* LEDC PWM channels; motors start stopped */
-        i2c_init();
+        i2c_init();       // I2C master bus, created once and reused on restart
         i2c_scan();
-        if (!mpu6050_init()) {
-            ESP_LOGW(TAG, "continuing without IMU - check wiring at SDA=21 SCL=22");
-        }
         s_periph_ready = true;
+    }
+
+    /* Retry the IMU on every (re)start until it succeeds (init is idempotent), so
+     * fixing the wiring and restarting the control task brings it up, no reboot. */
+    if (!s_imu_present) {
+        s_imu_present = mpu6050_init();
+        if (!s_imu_present) {
+            ESP_LOGW(TAG, "no IMU - balance disabled, skipping IMU reads; motors + "
+                          "encoders still run (check wiring at SDA=21 SCL=22, then "
+                          "restart the control task to retry)");
+        }
     }
 
     /* Start the GPTimer from THIS task so its interrupt is pinned to core 1. First
@@ -289,6 +303,7 @@ static void control_task(void *arg)
     uint32_t bal_count = 0;        /* sub-rate counter: fires balance every BALANCE_DIV ticks */
     int64_t  bal_dt_us = 0;        /* time accumulated since the last balance update [us] */
     bool     bal_cut   = false;    /* latched: motors cut because tilt exceeded the limit */
+    uint32_t imu_fail_streak = 0;  /* consecutive failed reads; drops the IMU past the limit */
     int     active = 0;            /* buffer we are currently writing into */
     int     idx = 0;               /* next slot in the active buffer */
 
@@ -311,16 +326,30 @@ static void control_task(void *arg)
 
         /* Read the IMU every tick; the ~0.4 ms I2C transfer blocks only this task.
          * Time it separately and, on failure/timeout, HOLD the last good sample and
-         * mark it stale rather than stalling the tick or feeding the estimator zeros. */
-        int64_t imu_t0    = esp_timer_get_time();
-        imu_t   imu_fresh = mpu6050_read();
-        int32_t imu_us    = (int32_t)(esp_timer_get_time() - imu_t0);
-        if (imu_us > s_warn_imu_us) s_warn_imu_us = imu_us;
-        if (imu_fresh.ok) {
-            imu = imu_fresh;       /* fresh sample */
+         * mark it stale rather than stalling the tick or feeding the estimator zeros.
+         * With no IMU present we never touch the bus - balance can't run anyway. */
+        if (s_imu_present) {
+            int64_t imu_t0    = esp_timer_get_time();
+            imu_t   imu_fresh = mpu6050_read();
+            int32_t imu_us    = (int32_t)(esp_timer_get_time() - imu_t0);
+            if (imu_us > s_warn_imu_us) s_warn_imu_us = imu_us;
+            if (imu_fresh.ok) {
+                imu = imu_fresh;       /* fresh sample */
+                imu_fail_streak = 0;
+            } else {
+                imu.ok = false;        /* keep last good ax..gz, flag stale (estimator holds) */
+                s_imu_stale_count++;
+                /* A long run of failures means the IMU is gone (unplugged/dead). Drop it so
+                 * we stop hammering the bus and balance disables; a control restart re-inits.
+                 * The reporter task surfaces the event to the web terminal (off the RT path). */
+                if (++imu_fail_streak > IMU_FAIL_LIMIT) {
+                    s_imu_present  = false;
+                    s_imu_lost_evt = true;
+                    imu_fail_streak = 0;
+                }
+            }
         } else {
-            imu.ok = false;        /* keep last good ax..gz, flag stale (estimator holds) */
-            s_imu_stale_count++;
+            imu.ok = false;            /* no IMU: no read, no estimate, no balance */
         }
 
         /* Gyro-bias calibration when armed: runs before the estimator so a completing
@@ -328,9 +357,10 @@ static void control_task(void *arg)
         if (s_gc_active) gyrocal_step(imu);
 
         /* Orientation estimate (roll/pitch, rad) from the complementary filter. Gated
-         * by the estimation flag; when off the angles topic is NaN and the filter re-seeds. */
+         * by the estimation flag AND a present IMU; when off (or no IMU) the angles
+         * topic is NaN and the filter re-seeds on the next good sample. */
         float roll = NAN, pitch = NAN;
-        if (!s_est_enabled) {
+        if (!s_est_enabled || !s_imu_present) {
             estimator_reset();
         } else {
             estimator_update(imu, dt_us * 1e-6f, &roll, &pitch);
@@ -388,7 +418,7 @@ static void control_task(void *arg)
                                                    : (float)BALANCE_DIV / (float)CONTROL_HZ;
                     bal_count = 0;
                     bal_dt_us = 0;
-                    bool have_theta = s_est_enabled && isfinite(pitch);
+                    bool have_theta = s_imu_present && s_est_enabled && isfinite(pitch);
                     if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
                         float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
                         float w_common  = balance_pid_step(pitch, theta_dot, bal_dt);
@@ -550,6 +580,18 @@ static void emit_pending_warning(void)
                  stale, 1000 * SAMPLES_PER_BATCH / CONTROL_HZ, (long)imu_worst);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
+        ws_broadcast(json);
+    }
+
+    /* IMU dropped after a long failure run: balance is now disabled until a restart. */
+    if (s_imu_lost_evt) {
+        s_imu_lost_evt = false;
+        snprintf(msg, sizeof(msg),
+                 "IMU lost after %d consecutive failed reads - balance disabled; "
+                 "restart the control task to retry",
+                 IMU_FAIL_LIMIT);
+        ESP_LOGW(TAG, "%s", msg);
+        snprintf(json, sizeof(json), "{\"type\":\"error\",\"text\":\"%s\"}", msg);
         ws_broadcast(json);
     }
 }

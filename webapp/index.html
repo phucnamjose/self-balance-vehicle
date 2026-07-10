@@ -68,6 +68,7 @@
     .resp { color: var(--green); }
     .sys { color: var(--muted); }
     .warn { color: var(--amber); }
+    .error { color: var(--red); font-weight: bold; }
     #bar { display: flex; gap: 8px; margin-top: 8px; }
     #in { flex: 1; }
 
@@ -479,6 +480,8 @@
               `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}${mode}`, 'resp');
         } else if (d.type === 'warn') {
           add('WARN: ' + d.text, 'warn');
+        } else if (d.type === 'error') {
+          add('ERROR: ' + d.text, 'error');
         } else if (d.type === 'resp') {
           add(d.text, 'resp');
           syncGains(d.text);
