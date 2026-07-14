@@ -18,9 +18,17 @@
  * (COMP_ALPHA_DEFAULT, VEL_WIN) are preserved in time when this changes. */
 #define CONTROL_HZ     500
 
-/* Loop period and batch size, derived from the rate so a batch is always 200 ms. */
+/* Telemetry is recorded every REPORT_DIV-th tick, so the streamed sample rate is
+ * REPORT_HZ - well below the loop rate. Control still runs at CONTROL_HZ; only what we
+ * log/stream is decimated, which cuts WebSocket + reporter CPU load. */
+#define REPORT_DIV     5
+#define REPORT_HZ      (CONTROL_HZ / REPORT_DIV)
+
+/* Loop period and batch size. A batch holds SAMPLES_PER_BATCH telemetry samples
+ * (0.2 s at REPORT_HZ); BATCH_MS is that span, used for the warning windows. */
 #define CONTROL_PERIOD_US   (1000000 / CONTROL_HZ)
-#define SAMPLES_PER_BATCH   (CONTROL_HZ / 5)
+#define SAMPLES_PER_BATCH   (REPORT_HZ / 5)
+#define BATCH_MS            (1000 * SAMPLES_PER_BATCH / REPORT_HZ)
 
 /* Period warning band, an ABSOLUTE margin (not a % of the period): jitter sources
  * are absolute in time (scheduler wake, a ~1 ms I2C stall) and don't scale with

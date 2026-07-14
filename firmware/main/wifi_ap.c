@@ -25,6 +25,11 @@ void wifi_init_softap(void)
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
 
+    /* Keep config in RAM: the AP is set up in code every boot, so persisting it to NVS
+     * only adds runtime flash writes. A flash erase halts BOTH CPUs (~ms) and can freeze
+     * core 1 mid-LEDC/-I2C critical section - the motor_init interrupt-WDT lockup. */
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
     wifi_config_t ap = {
         .ap = {
             .ssid           = WIFI_AP_SSID,

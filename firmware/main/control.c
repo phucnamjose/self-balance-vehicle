@@ -32,9 +32,10 @@ static const char *TAG = "control";
 /* Gyro is reported in deg/s; the balance loop wants the tilt rate in rad/s. */
 #define DEG2RAD        (float)(M_PI / 180.0)
 
-/* Balance (outer) loop runs every BALANCE_DIV-th tick (250 Hz): a healthy margin
- * above the ~32 rad/s crossover, while the estimator and wheel loops stay on the
- * full 500 Hz tick. Only the balance command's ZOH runs slower. Must divide CONTROL_HZ. */
+/* Sub-rate for the IMU read, orientation estimate and balance loop: 250 Hz, a healthy
+ * margin above the ~32 rad/s crossover. Pacing the costly MPU6050 read (plus estimator
+ * + balance ZOH) at half rate frees budget; the wheel loop, encoders and telemetry keep
+ * the full CONTROL_HZ tick. Must divide CONTROL_HZ. */
 #define BALANCE_HZ     250
 #define BALANCE_DIV    (CONTROL_HZ / BALANCE_HZ)
 _Static_assert(CONTROL_HZ % BALANCE_HZ == 0, "BALANCE_HZ must divide CONTROL_HZ exactly");
@@ -48,9 +49,9 @@ _Static_assert(CONTROL_HZ % BALANCE_HZ == 0, "BALANCE_HZ must divide CONTROL_HZ 
 #define REPORT_FRAME_MAX_FIELDS 9
 #define REPORT_FRAME_CAP  (4 + SAMPLES_PER_BATCH * (8 + (REPORT_FRAME_MAX_FIELDS - 1) * 4) + 64)
 
-/* Stream the bulky imu topic once per second (every IMU_STREAM_DIV-th batch) while
- * motors/angles stream every batch. Also decimates imu recordings to that cadence. */
-#define IMU_STREAM_DIV  (CONTROL_HZ / SAMPLES_PER_BATCH)
+/* Stream the bulky imu topic once per second (every IMU_STREAM_DIV-th batch = batches
+ * per second) while motors/angles stream every batch. */
+#define IMU_STREAM_DIV  (REPORT_HZ / SAMPLES_PER_BATCH)
 
 static TaskHandle_t s_control_task;
 
@@ -68,6 +69,10 @@ static volatile uint32_t s_warn_count;   /* violations since the last report */
  * it. Separate from the period warning so slow-to-schedule vs slow-to-compute is clear. */
 static volatile int32_t  s_warn_run_us;    /* worst over-budget run time */
 static volatile uint32_t s_warn_run_count; /* overruns since the last report */
+
+/* Telemetry batches dropped because the reporter fell behind. Counted on the RT
+ * path (never logged there), drained by the reporter. */
+static volatile uint32_t s_drop_count;
 
 /* Per-phase profiling: the IMU read is the tick's only variable-latency blocking
  * call (I2C), so time it separately. s_imu_stale_count counts failed reads. */
@@ -253,8 +258,8 @@ static void deadband_step(int64_t now_us, float *cmdL, float *cmdR)
     *cmdR = cmd[1];
 }
 
-/* High-priority task woken by the timer ISR every 1/CONTROL_HZ s. Records one
- * sample per tick; swaps buffers every SAMPLES_PER_BATCH and notifies the reporter. */
+/* High-priority task woken by the timer ISR every 1/CONTROL_HZ s. Records one telemetry
+ * sample every REPORT_DIV ticks; swaps buffers every SAMPLES_PER_BATCH and notifies the reporter. */
 static void control_task(void *arg)
 {
     /* Claim this task's handle for the ISR before the timer can fire. */
@@ -300,10 +305,12 @@ static void control_task(void *arg)
     bool    primed = false;        /* skip the warning check on the first tick */
     bool    ctrl_was = false;      /* previous tick's controller-enabled state */
     bool    bal_was  = false;      /* previous tick's balance-enabled state */
-    uint32_t bal_count = 0;        /* sub-rate counter: fires balance every BALANCE_DIV ticks */
-    int64_t  bal_dt_us = 0;        /* time accumulated since the last balance update [us] */
-    bool     bal_cut   = false;    /* latched: motors cut because tilt exceeded the limit */
-    uint32_t imu_fail_streak = 0;  /* consecutive failed reads; drops the IMU past the limit */
+    uint32_t slow_count = 0;       // ticks since the last sub-rate (BALANCE_HZ) fire
+    int64_t  slow_dt_us = 0;       // time accumulated since that fire [us]
+    bool     bal_cut   = false;    // latched: motors cut because tilt exceeded the limit
+    uint32_t imu_fail_streak = 0;  // consecutive failed reads; drops the IMU past the limit
+    float    roll = NAN, pitch = NAN;  // latest estimate [rad], held between sub-rate fires
+    uint32_t rpt_count = 0;        // ticks since the last recorded telemetry sample
     int     active = 0;            /* buffer we are currently writing into */
     int     idx = 0;               /* next slot in the active buffer */
 
@@ -324,11 +331,21 @@ static void control_task(void *arg)
         }
         primed = true;
 
-        /* Read the IMU every tick; the ~0.4 ms I2C transfer blocks only this task.
-         * Time it separately and, on failure/timeout, HOLD the last good sample and
-         * mark it stale rather than stalling the tick or feeding the estimator zeros.
-         * With no IMU present we never touch the bus - balance can't run anyway. */
-        if (s_imu_present) {
+        /* Sub-rate gate (BALANCE_HZ) for the IMU read, estimator and balance; slow_dt is
+         * their true accumulated period. Wheel loop and telemetry stay at CONTROL_HZ. */
+        slow_dt_us += dt_us;
+        bool  slow_tick = (++slow_count >= BALANCE_DIV);
+        float slow_dt   = 0.0f;
+        if (slow_tick) {
+            slow_count = 0;
+            slow_dt    = (slow_dt_us > 0) ? (float)slow_dt_us * 1e-6f
+                                          : (float)BALANCE_DIV / (float)CONTROL_HZ;
+            slow_dt_us = 0;
+        }
+
+        /* Read the IMU on sub-rate ticks (~0.5 ms blocking I2C). On failure/timeout hold
+         * the last good sample and flag it stale; with no IMU we never touch the bus. */
+        if (slow_tick && s_imu_present) {
             int64_t imu_t0    = esp_timer_get_time();
             imu_t   imu_fresh = mpu6050_read();
             int32_t imu_us    = (int32_t)(esp_timer_get_time() - imu_t0);
@@ -348,22 +365,22 @@ static void control_task(void *arg)
                     imu_fail_streak = 0;
                 }
             }
-        } else {
+        } else if (slow_tick) {
             imu.ok = false;            /* no IMU: no read, no estimate, no balance */
         }
 
-        /* Gyro-bias calibration when armed: runs before the estimator so a completing
-         * calibration re-seeds it the same tick. */
-        if (s_gc_active) gyrocal_step(imu);
+        // Gyro-bias calibration when armed; before the estimator so it re-seeds same tick.
+        if (slow_tick && s_gc_active) gyrocal_step(imu);
 
-        /* Orientation estimate (roll/pitch, rad) from the complementary filter. Gated
-         * by the estimation flag AND a present IMU; when off (or no IMU) the angles
-         * topic is NaN and the filter re-seeds on the next good sample. */
-        float roll = NAN, pitch = NAN;
-        if (!s_est_enabled || !s_imu_present) {
-            estimator_reset();
-        } else {
-            estimator_update(imu, dt_us * 1e-6f, &roll, &pitch);
+        /* Complementary-filter tilt estimate, held between sub-rate fires. NaN when
+         * estimation is off, no IMU, or not yet seeded. */
+        if (slow_tick) {
+            if (!s_est_enabled || !s_imu_present) {
+                estimator_reset();
+                roll = NAN; pitch = NAN;
+            } else if (!estimator_update(imu, slow_dt, &roll, &pitch)) {
+                roll = NAN; pitch = NAN;   /* not seeded yet */
+            }
         }
 
         /* Wheel angular speed (rad/s), before the command decision so the controller
@@ -402,26 +419,18 @@ static void control_task(void *arg)
              * catch strategy can't recover, so cut the motors rather than lunge. */
             bool balance_cut = false;
             if (s_bal_enabled) {
-                /* Rising edge: clear state and align the sub-rate to a full BALANCE_DIV window. */
+                /* Rising edge: clear state. */
                 if (!bal_was) {
                     balance_pid_reset();
-                    bal_count = 0;
-                    bal_dt_us = 0;
-                    bal_cut   = false;
+                    bal_cut = false;
                 }
-                /* Accumulate elapsed time every tick; run the balance PID once per
-                 * BALANCE_DIV ticks with the true period so the Ki integral stays correct.
-                 * Setpoints are held (ZOH) between updates; inner loops track every tick. */
-                bal_dt_us += dt_us;
-                if (++bal_count >= BALANCE_DIV) {
-                    float bal_dt = (bal_dt_us > 0) ? (float)bal_dt_us * 1e-6f
-                                                   : (float)BALANCE_DIV / (float)CONTROL_HZ;
-                    bal_count = 0;
-                    bal_dt_us = 0;
+                /* Fires on the sub-rate tick (fresh estimate, slow_dt period so Ki stays
+                 * correct); setpoints held (ZOH) between fires, inner loops track every tick. */
+                if (slow_tick) {
                     bool have_theta = s_imu_present && s_est_enabled && isfinite(pitch);
                     if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
                         float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
-                        float w_common  = balance_pid_step(pitch, theta_dot, bal_dt);
+                        float w_common  = balance_pid_step(pitch, theta_dot, slow_dt);
                         wheel_pi_set_setpoint(0, w_common);
                         wheel_pi_set_setpoint(1, w_common);
                         bal_cut = false;
@@ -480,32 +489,36 @@ static void control_task(void *arg)
         ctrl_was = s_ctrl_enabled;
         bal_was  = s_bal_enabled;
 
-        /* Record this tick. Wheel angle is the continuous count; speeds reuse the
-         * values computed above. wsetL/wsetR are the closed-loop setpoints (NaN when open). */
-        sample_t *smp = &s_buf[active][idx];
-        smp->t_us = now_us;
-        smp->posL = (float)encoder_angle_rad(0);
-        smp->posR = (float)encoder_angle_rad(1);
-        smp->velL = velL;
-        smp->velR = velR;
-        smp->roll  = roll;
-        smp->pitch = pitch;
-        smp->wsetL = wsetL;
-        smp->wsetR = wsetR;
-        smp->rawL   = rawL;
-        smp->rawR   = rawR;
-        smp->mL   = cmdL;
-        smp->mR   = cmdR;
-        smp->imu  = imu;
+        /* Record telemetry every REPORT_DIV-th tick (REPORT_HZ) to cut streamed data;
+         * control still runs full rate. Wheel angle is the continuous count; speeds reuse
+         * the values above. wsetL/wsetR are the closed-loop setpoints (NaN when open). */
+        if (++rpt_count >= REPORT_DIV) {
+            rpt_count = 0;
+            sample_t *smp = &s_buf[active][idx];
+            smp->t_us = now_us;
+            smp->posL = (float)encoder_angle_rad(0);
+            smp->posR = (float)encoder_angle_rad(1);
+            smp->velL = velL;
+            smp->velR = velR;
+            smp->roll  = roll;
+            smp->pitch = pitch;
+            smp->wsetL = wsetL;
+            smp->wsetR = wsetR;
+            smp->rawL   = rawL;
+            smp->rawR   = rawR;
+            smp->mL   = cmdL;
+            smp->mR   = cmdR;
+            smp->imu  = imu;
 
-        /* Buffer full: hand it to the reporter (timeout 0, never blocks) and swap halves.
-         * If the reporter fell behind we drop this batch rather than stall the loop. */
-        if (++idx >= SAMPLES_PER_BATCH) {
-            if (xQueueSend(s_ready_q, &active, 0) != pdPASS) {
-                ESP_LOGW(TAG, "reporter behind - dropping a telemetry batch");
+            /* Buffer full: hand it to the reporter (timeout 0, never blocks) and swap
+             * halves. If the reporter fell behind we drop this batch, never stall. */
+            if (++idx >= SAMPLES_PER_BATCH) {
+                if (xQueueSend(s_ready_q, &active, 0) != pdPASS) {
+                    s_drop_count++;   /* reporter behind; the reporter logs it, not us */
+                }
+                active = !active;
+                idx = 0;
             }
-            active = !active;
-            idx = 0;
         }
 
         /* Compute-budget watchdog: time this tick's work; keep the worst for the
@@ -543,7 +556,7 @@ static void emit_pending_warning(void)
         snprintf(msg, sizeof(msg),
                  "loop timing out of range: %" PRIu32 " tick(s) in the last %d ms, "
                  "latest dt=%ld us (want ~%d, limits %d..%d)",
-                 n, 1000 * SAMPLES_PER_BATCH / CONTROL_HZ, (long)dt,
+                 n, BATCH_MS, (long)dt,
                  CONTROL_PERIOD_US, DT_MIN_WARN_US, DT_MAX_WARN_US);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
@@ -560,7 +573,7 @@ static void emit_pending_warning(void)
         snprintf(msg, sizeof(msg),
                  "control task over budget: %" PRIu32 " tick(s) in the last %d ms, "
                  "worst run=%ld us (limit %d us = 90%% of %d); worst IMU read=%ld us",
-                 rn, 1000 * SAMPLES_PER_BATCH / CONTROL_HZ, (long)run,
+                 rn, BATCH_MS, (long)run,
                  RUN_WARN_US, CONTROL_PERIOD_US, (long)s_warn_imu_us);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
@@ -577,7 +590,19 @@ static void emit_pending_warning(void)
         snprintf(msg, sizeof(msg),
                  "IMU read stalled: %" PRIu32 " stale read(s) in the last %d ms "
                  "(held last sample); worst IMU read=%ld us",
-                 stale, 1000 * SAMPLES_PER_BATCH / CONTROL_HZ, (long)imu_worst);
+                 stale, BATCH_MS, (long)imu_worst);
+        ESP_LOGW(TAG, "%s", msg);
+        snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
+        ws_broadcast(json);
+    }
+
+    /* Telemetry batches dropped because this reporter couldn't keep up. */
+    uint32_t drops = s_drop_count;
+    if (drops != 0) {
+        s_drop_count = 0;
+        snprintf(msg, sizeof(msg),
+                 "reporter behind: dropped %" PRIu32 " telemetry batch(es) in the last %d ms",
+                 drops, BATCH_MS);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
         ws_broadcast(json);

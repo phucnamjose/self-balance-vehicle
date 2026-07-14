@@ -2,11 +2,13 @@
 
 #include <math.h>
 
-/* Complementary-filter weight. tau = alpha*dt/(1-alpha), so alpha is rate-dependent:
- * 0.992 keeps tau ~= 0.245 s (crossover ~0.65 Hz) at 500 Hz. The gyro carries fast
- * tilt, the accel trims slow drift. Runtime-tunable; clamped < 1 to stay stable. */
+/* Complementary-filter weight, quoted as alpha at COMP_REF_DT. The filter turns it into
+ * a time constant tau = alpha*dt_ref/(1-alpha) and recomputes the weight for the actual
+ * dt, so the ~0.245 s crossover holds if the loop rate changes. Clamped < 1 to stay
+ * stable; runtime-tunable via the web UI. */
 #define COMP_ALPHA_DEFAULT  0.992f
 #define COMP_ALPHA_MAX      0.9999f
+#define COMP_REF_DT         (1.0f / 500.0f)   // rate alpha is quoted at [s]
 #define DEG2RAD             (float)(M_PI / 180.0)
 
 /* alpha: written by the web task (core 0), read by the control loop (core 1);
@@ -42,8 +44,11 @@ bool estimator_update(imu_t imu, float dt, float *roll, float *pitch)
             s_roll  = roll_acc;
             s_init  = true;
         } else {
-            /* Predict with the gyro (integrate the rate), correct toward accel. */
-            float a = s_alpha;
+            /* Gyro predict + accel correct. Rescale a_ref to the actual dt (via tau) so
+             * the crossover is rate-independent; at dt = dt_ref this gives a = a_ref. */
+            float a_ref = s_alpha;
+            float tau   = a_ref * COMP_REF_DT / (1.0f - a_ref);
+            float a     = tau / (tau + dt);
             s_pitch = a * (s_pitch + imu.gy * DEG2RAD * dt) + (1.0f - a) * pitch_acc;
             s_roll  = a * (s_roll  + imu.gx * DEG2RAD * dt) + (1.0f - a) * roll_acc;
         }

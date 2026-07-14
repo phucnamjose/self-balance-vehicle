@@ -31,9 +31,12 @@ static const char *TAG = "imu";
 #define MPU_ACCEL_LSB_PER_G    16384.0f
 #define MPU_GYRO_LSB_PER_DPS   131.0f
 
-/* Per-read I2C timeout. Well under one 2 ms tick so a bus glitch fails fast (caller
- * holds the last sample) and costs one stale sample rather than a missed tick. */
-#define MPU_I2C_TIMEOUT_MS     1
+/* Per-read I2C timeout. Must sit ABOVE a normal read (~0.5-1.7 ms under scheduler
+ * load), otherwise the driver aborts a transfer mid-transaction - which leaves the
+ * MPU holding the bus and triggers a reset + stall cascade (measured 5-25 ms reads).
+ * It only bounds a genuinely stuck bus; a healthy read still returns in ~1 ms. The
+ * caller holds the last sample on the rare timeout. */
+#define MPU_I2C_TIMEOUT_MS     5
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_mpu;       /* MPU6050 device on the I2C bus */
@@ -65,7 +68,7 @@ void i2c_init(void)
         .scl_io_num        = I2C_SCL_GPIO,
         .clk_source        = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,   /* helps if the module lacks pull-ups */
+        .flags.enable_internal_pullup = false,   /* external pull-ups on SDA/SCL */
     };
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &s_i2c_bus));
     ESP_LOGI(TAG, "I2C master on SDA=%d SCL=%d @ %d Hz",
