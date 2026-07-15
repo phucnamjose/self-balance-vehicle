@@ -1,0 +1,10 @@
+# Target the ESP32 DevKit so `idf.py build` works without a manual set-target.
+CONFIG_IDF_TARGET="esp32"
+
+# DevKit has a 4 MB flash chip; match it so the bootloader stops warning that the
+# detected size is larger than the image header.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# WebSocket support in the HTTP server (the PC-facing side of the bridge).
+CONFIG_HTTPD_WS_SUPPORT=y

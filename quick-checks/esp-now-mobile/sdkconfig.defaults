@@ -1,0 +1,8 @@
+# Target the ESP32 DevKit so `idf.py build` works without a manual set-target.
+CONFIG_IDF_TARGET="esp32"
+
+# DevKit has a 4 MB flash chip; match it to silence the bootloader size warning.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Mobile keeps its console on the built-in USB, so normal logs are fine here.
