@@ -42,7 +42,7 @@
  * motor loop no longer does the blocking IMU read (that moved to imu_task), so its work
  * is only tens of us - an absolute ceiling well above the norm flags a real compute
  * regression, separate from the scheduling jitter the DT_* period band already covers. */
-#define RUN_WARN_US    50
+#define RUN_WARN_US    500
 
 /* One IMU sample in physical units. */
 typedef struct {

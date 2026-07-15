@@ -10,16 +10,21 @@ static const char *TAG = "motors";
 #define PWM_MODE       LEDC_LOW_SPEED_MODE
 
 /* --- XY-160D dual H-bridge motor driver (see docs/hardware/xy-160d-motor-driver.md) ---
- * Each motor: ENx = PWM speed, IN1/IN2 = direction. Left = ch 1, Right = ch 2. */
-#define MOTOR_L_PWM        GPIO_NUM_25            /* -> ENA */
-#define MOTOR_L_IN1        GPIO_NUM_26            /* -> IN1 */
-#define MOTOR_L_IN2        GPIO_NUM_27            /* -> IN2 */
-#define MOTOR_R_PWM        GPIO_NUM_33            /* -> ENB */
-#define MOTOR_R_IN1        GPIO_NUM_32            /* -> IN3 */
-#define MOTOR_R_IN2        GPIO_NUM_14            /* -> IN4 */
+ * Each motor: ENx = PWM speed, IN1/IN2 = direction. The driver's two motor OUTPUTS are
+ * swapped at the terminal block for wiring convenience, so the LEFT wheel is now fed by
+ * the driver's M2 side (ENB/IN3/IN4) and the RIGHT wheel by M1 (ENA/IN1/IN2). The ESP32
+ * -> driver pin wiring is unchanged; we just point each wheel at the other channel so
+ * left/right commands, encoders and PI gains still line up with the physical wheels. */
+#define MOTOR_L_PWM        GPIO_NUM_33            /* -> ENB (driver M2) */
+#define MOTOR_L_IN1        GPIO_NUM_32            /* -> IN3 */
+#define MOTOR_L_IN2        GPIO_NUM_14            /* -> IN4 */
+#define MOTOR_R_PWM        GPIO_NUM_25            /* -> ENA (driver M1) */
+#define MOTOR_R_IN1        GPIO_NUM_26            /* -> IN1 */
+#define MOTOR_R_IN2        GPIO_NUM_27            /* -> IN2 */
 
 /* Spin direction for a positive command. Flip to -1 if a wheel turns backwards
- * relative to its encoder, so +cmd always gives +encoder counts (forward). */
+ * relative to its encoder, so +cmd always gives +encoder counts (forward). Re-verify
+ * after the output swap: moving the leads to the other terminal can flip a wheel. */
 #define MOTOR_L_SIGN       (-1)
 #define MOTOR_R_SIGN       (+1)
 
