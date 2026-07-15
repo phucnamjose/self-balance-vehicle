@@ -2,8 +2,8 @@
  * @file telemetry.h
  * @brief Shared loop-state types and the cached snapshot used by the web server.
  *
- * The control loop writes one sample_t per tick into a double buffer; after
- * SAMPLES_PER_BATCH samples (0.2 s) it hands the full buffer to the reporter,
+ * The motor loop writes one sample_t every REPORT_DIV ticks into a double buffer;
+ * after SAMPLES_PER_BATCH samples (0.2 s) it hands the full buffer to the reporter,
  * which caches the latest sample and streams the batch to the browser.
  */
 #pragma once
@@ -38,9 +38,11 @@
 #define DT_MAX_WARN_US (CONTROL_PERIOD_US + DT_JITTER_MARGIN_US)
 #define DT_MIN_WARN_US (CONTROL_PERIOD_US - DT_JITTER_MARGIN_US)
 
-/* Compute-budget limit: how long the tick's WORK takes (vs the period above). Warn
- * once it exceeds 95% of the period (1.9 ms at 500 Hz), or the next tick starts late. */
-#define RUN_WARN_US    (CONTROL_PERIOD_US * 95 / 100)                  /* 90% */
+/* Motor-task compute-budget limit [us]: warn if a 500 Hz tick's WORK exceeds this. The
+ * motor loop no longer does the blocking IMU read (that moved to imu_task), so its work
+ * is only tens of us - an absolute ceiling well above the norm flags a real compute
+ * regression, separate from the scheduling jitter the DT_* period band already covers. */
+#define RUN_WARN_US    50
 
 /* One IMU sample in physical units. */
 typedef struct {
@@ -50,7 +52,7 @@ typedef struct {
     float temp_c;          /* die temperature in degC */
 } imu_t;
 
-/* One per-tick sample, produced by control_task at CONTROL_HZ. */
+/* One recorded sample, produced by motor_task at REPORT_HZ. */
 typedef struct {
     int64_t t_us;          /* esp_timer_get_time() at this tick (real time) */
     float   posL, posR;    /* wheel angle, radians */

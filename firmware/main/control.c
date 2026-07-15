@@ -22,7 +22,7 @@
 static const char *TAG = "control";
 
 #define TIMER_RES_HZ   1000000                   /* 1 MHz -> 1 tick = 1 us */
-#define ALARM_COUNT    (TIMER_RES_HZ / CONTROL_HZ)
+#define ALARM_COUNT    (TIMER_RES_HZ / CONTROL_HZ)       /* 500 Hz motor tick */
 
 /* Wheel speed = finite difference of encoder counts over a sliding VEL_WIN-tick
  * window; averaging cuts count-quantization noise (~14 ms window at 500 Hz).
@@ -32,16 +32,20 @@ static const char *TAG = "control";
 /* Gyro is reported in deg/s; the balance loop wants the tilt rate in rad/s. */
 #define DEG2RAD        (float)(M_PI / 180.0)
 
-/* Sub-rate for the IMU read, orientation estimate and balance loop: 250 Hz, a healthy
- * margin above the ~32 rad/s crossover. Pacing the costly MPU6050 read (plus estimator
- * + balance ZOH) at half rate frees budget; the wheel loop, encoders and telemetry keep
- * the full CONTROL_HZ tick. Must divide CONTROL_HZ. */
-#define BALANCE_HZ     250
-#define BALANCE_DIV    (CONTROL_HZ / BALANCE_HZ)
-_Static_assert(CONTROL_HZ % BALANCE_HZ == 0, "BALANCE_HZ must divide CONTROL_HZ exactly");
+/* The IMU read, orientation estimate and balance loop run in a separate imu_task at
+ * this rate - a healthy margin above the ~32 rad/s crossover. Running the costly,
+ * blocking MPU6050 read in its own lower-priority task keeps it off the motor tick, so
+ * an I2C stall can never blow the 500 Hz budget. The MPU samples at 500 Hz into its
+ * FIFO; the task consumes the newest at IMU_HZ. */
+#define IMU_HZ          250
+#define IMU_ALARM_COUNT (TIMER_RES_HZ / IMU_HZ)          /* 250 Hz IMU+balance tick */
 
-/* Consecutive failed IMU reads that mean it is gone (~200 ms at 500 Hz), not a blip. */
+/* Consecutive stale IMU ticks that mean it is gone (~400 ms at 250 Hz), not a blip. */
 #define IMU_FAIL_LIMIT 100
+
+/* Emit the periodic loop-stats line every STATS_DIV telemetry batches (~1 s). */
+#define STATS_DIV      (1000 / BATCH_MS)
+#define STATS_MS       (STATS_DIV * BATCH_MS)
 
 /* Scratch buffer for one packed telemetry frame, derived from SAMPLES_PER_BATCH so
  * it tracks CONTROL_HZ (a fixed size overflowed at 500 Hz and dropped topics).
@@ -53,12 +57,53 @@ _Static_assert(CONTROL_HZ % BALANCE_HZ == 0, "BALANCE_HZ must divide CONTROL_HZ 
  * per second) while motors/angles stream every batch. */
 #define IMU_STREAM_DIV  (REPORT_HZ / SAMPLES_PER_BATCH)
 
-static TaskHandle_t s_control_task;
+/* Two RT tasks on core 1: motor_task (500 Hz, hard-RT, no I2C) and imu_task (250 Hz,
+ * one priority below, owns the blocking IMU read + estimator + balance). */
+static TaskHandle_t s_motor_task;
+static TaskHandle_t s_imu_task;
 
-/* Double buffer: control_task fills one half while the reporter drains the other,
+/* imu_task -> motor_task control handoff (single 32-bit values, atomic on Xtensa). The
+ * balance loop publishes the common wheel-speed setpoint and a fall-cut flag; the motor
+ * loop tracks them via ZOH every tick. */
+static volatile float s_bal_w_common;   /* balance output, rad/s */
+static volatile bool  s_bal_cut;         /* tilt exceeded: motor loop zeroes the wheels */
+
+/* imu_task -> motor_task telemetry snapshot (imu + estimate), published under a seqlock
+ * so the motor loop reads a consistent frame without a mutex on the RT path. */
+static volatile uint32_t s_pub_seq;      /* even = stable, odd = write in progress */
+static imu_t s_pub_imu;
+static float s_pub_roll = NAN, s_pub_pitch = NAN;
+
+/* Double buffer: motor_task fills one half while the reporter drains the other,
  * swapping every SAMPLES_PER_BATCH. The queue passes the filled buffer's index. */
 static sample_t      s_buf[2][SAMPLES_PER_BATCH];
 static QueueHandle_t s_ready_q;
+
+/* Publish the estimate + IMU snapshot (imu_task). Bracket the write with an odd->even
+ * seq bump; the barriers stop the compiler reordering the payload past the seq. */
+static void imu_pub_write(const imu_t *imu, float roll, float pitch)
+{
+    s_pub_seq++;
+    __asm__ volatile("" ::: "memory");
+    s_pub_imu = *imu; s_pub_roll = roll; s_pub_pitch = pitch;
+    __asm__ volatile("" ::: "memory");
+    s_pub_seq++;
+}
+
+/* Read the snapshot (motor_task). One attempt; if the writer is mid-update, leave the
+ * outputs untouched (the caller keeps its previous copy) - never spin, since the writer
+ * is lower priority and could not make progress while we wait. */
+static void imu_pub_try_read(imu_t *imu, float *roll, float *pitch)
+{
+    uint32_t s0 = s_pub_seq;
+    if (s0 & 1u) return;
+    __asm__ volatile("" ::: "memory");
+    imu_t  i = s_pub_imu;
+    float  r = s_pub_roll, p = s_pub_pitch;
+    __asm__ volatile("" ::: "memory");
+    if (s_pub_seq != s0) return;
+    *imu = i; *roll = r; *pitch = p;
+}
 
 /* Timing-warning handoff: the loop records an out-of-range period and bumps the
  * counter; the reporter (off the RT path) drains it into one warning per batch. */
@@ -70,6 +115,12 @@ static volatile uint32_t s_warn_count;   /* violations since the last report */
 static volatile int32_t  s_warn_run_us;    /* worst over-budget run time */
 static volatile uint32_t s_warn_run_count; /* overruns since the last report */
 
+/* Missed-tick metrics: when a task is late, ulTaskNotifyTake returns >1 pending ticks;
+ * we run the latest once and count the rest here (drained by the reporter each window). */
+static volatile uint32_t s_motor_missed;   /* 500 Hz ticks the motor task ran late for */
+static volatile uint32_t s_imu_missed;     /* 250 Hz ticks the IMU task ran late for */
+static volatile uint32_t s_imu_skipped;    /* older FIFO frames dropped (take-newest) */
+
 /* Telemetry batches dropped because the reporter fell behind. Counted on the RT
  * path (never logged there), drained by the reporter. */
 static volatile uint32_t s_drop_count;
@@ -80,14 +131,31 @@ static volatile int32_t  s_warn_imu_us;      /* worst IMU-read time in the windo
 static volatile uint32_t s_imu_stale_count;  /* failed/timed-out reads (held last) */
 static volatile bool     s_imu_lost_evt;     /* set when the IMU is dropped; reporter broadcasts it */
 
-/* Control-task lifecycle: STOP_CONTROL deletes the task and parks the motors;
- * START_CONTROL re-creates it. The GPTimer/peripherals are set up once and reused. */
+/* Loop-stats accumulators: each task sums its per-tick run time (+ the IMU task sums
+ * new samples/tick), the reporter averages + resets them once per STATS window. These
+ * averages let you sanity-check an occasional out-of-range period against the typical
+ * run time, which normally sits well under budget. Sums fit uint32 over the window. */
+static volatile uint32_t s_motor_run_sum;    /* sum of motor tick run times [us] */
+static volatile uint32_t s_motor_run_cnt;    /* motor ticks summed */
+static volatile uint32_t s_imu_run_sum;      /* sum of IMU tick run times [us] */
+static volatile uint32_t s_imu_run_cnt;      /* IMU ticks summed */
+static volatile uint32_t s_imu_samp_sum;     /* sum of new samples seen per IMU tick */
+
+/* Last-window averages, published by the reporter for the stats command. */
+static volatile float s_stat_motor_run_us;   /* mean motor tick run time [us] */
+static volatile float s_stat_imu_run_us;     /* mean IMU tick run time [us] */
+static volatile float s_stat_imu_samples;    /* mean new IMU samples per IMU tick */
+
+/* Control lifecycle: STOP_CONTROL deletes both tasks and parks the motors;
+ * START_CONTROL re-creates them. The GPTimers/peripherals are set up once and reused. */
 static volatile control_mode_t s_mode = STOP_CONTROL;  /* set to START by control_start() */
-static gptimer_handle_t  s_timer;        /* created once, kept across stop/start */
+static gptimer_handle_t  s_timer;        /* 500 Hz motor timer, created once, kept across stop/start */
+static gptimer_handle_t  s_imu_timer;    /* 250 Hz IMU timer, likewise */
 static bool              s_periph_ready; /* peripherals init'd once, on first start */
-static bool              s_imu_present;   /* mpu6050_init() succeeded; if false we never
-                                           * touch the I2C bus and balance stays disabled */
-static volatile bool     s_stop_req;     /* ask the loop to exit at a safe point */
+static volatile bool     s_imu_present;  /* mpu6050_init() succeeded (motor_task sets it, imu_task
+                                          * clears it on loss); if false, imu_task skips the bus
+                                          * and balance stays disabled */
+static volatile bool     s_stop_req;     /* ask both loops to exit at a safe point */
 
 /* Research feature flags, read every tick. Default (all off) is a plain open-loop
  * motor test - no estimation or controller. */
@@ -169,37 +237,47 @@ static void gyrocal_step(imu_t imu)
     s_gc_report = true;
 }
 
-/* ISR context: keep it minimal - just wake the control task for the next tick. */
-static bool IRAM_ATTR on_timer_alarm(gptimer_handle_t timer,
+/* ISR context: keep it minimal - just wake the owning task for the next tick. */
+static bool IRAM_ATTR on_motor_alarm(gptimer_handle_t timer,
                                      const gptimer_alarm_event_data_t *edata,
                                      void *user_ctx)
 {
     BaseType_t high_prio_woken = pdFALSE;
-    vTaskNotifyGiveFromISR(s_control_task, &high_prio_woken);
+    if (s_motor_task) vTaskNotifyGiveFromISR(s_motor_task, &high_prio_woken);
     return high_prio_woken == pdTRUE;
 }
 
-/* Create + start the GPTimer once, stashing the handle so a restart just re-starts it. */
-static void start_control_timer(void)
+static bool IRAM_ATTR on_imu_alarm(gptimer_handle_t timer,
+                                   const gptimer_alarm_event_data_t *edata,
+                                   void *user_ctx)
+{
+    BaseType_t high_prio_woken = pdFALSE;
+    if (s_imu_task) vTaskNotifyGiveFromISR(s_imu_task, &high_prio_woken);
+    return high_prio_woken == pdTRUE;
+}
+
+/* Create + start a periodic GPTimer, stashing the handle so a restart just re-starts it. */
+static void start_timer(gptimer_handle_t *out, uint64_t alarm_count,
+                        gptimer_alarm_cb_t cb)
 {
     gptimer_config_t cfg = {
         .clk_src       = GPTIMER_CLK_SRC_DEFAULT,
         .direction     = GPTIMER_COUNT_UP,
         .resolution_hz = TIMER_RES_HZ,
     };
-    ESP_ERROR_CHECK(gptimer_new_timer(&cfg, &s_timer));
+    ESP_ERROR_CHECK(gptimer_new_timer(&cfg, out));
 
-    gptimer_event_callbacks_t cbs = { .on_alarm = on_timer_alarm };
-    ESP_ERROR_CHECK(gptimer_register_event_callbacks(s_timer, &cbs, NULL));
-    ESP_ERROR_CHECK(gptimer_enable(s_timer));
+    gptimer_event_callbacks_t cbs = { .on_alarm = cb };
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(*out, &cbs, NULL));
+    ESP_ERROR_CHECK(gptimer_enable(*out));
 
     gptimer_alarm_config_t alarm = {
         .reload_count = 0,
-        .alarm_count  = ALARM_COUNT,
+        .alarm_count  = alarm_count,
         .flags.auto_reload_on_alarm = true,
     };
-    ESP_ERROR_CHECK(gptimer_set_alarm_action(s_timer, &alarm));
-    ESP_ERROR_CHECK(gptimer_start(s_timer));
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(*out, &alarm));
+    ESP_ERROR_CHECK(gptimer_start(*out));
 }
 
 /* One tick of the deadband sweep: ramp the active direction and latch, per wheel,
@@ -258,13 +336,14 @@ static void deadband_step(int64_t now_us, float *cmdL, float *cmdR)
     *cmdR = cmd[1];
 }
 
-/* High-priority task woken by the timer ISR every 1/CONTROL_HZ s. Records one telemetry
- * sample every REPORT_DIV ticks; swaps buffers every SAMPLES_PER_BATCH and notifies the reporter. */
-static void control_task(void *arg)
-{
-    /* Claim this task's handle for the ISR before the timer can fire. */
-    s_control_task = xTaskGetCurrentTaskHandle();
+static void imu_task(void *arg);   /* spawned by motor_task once peripherals are up */
 
+/* Hard-real-time 500 Hz task (core 1, highest control priority). Owns the encoders,
+ * wheel PI and motor output and records telemetry; it never touches I2C, so nothing
+ * here can block on the sensor bus. On the first start it brings up the shared
+ * peripherals + both GPTimers and spawns imu_task. */
+static void motor_task(void *arg)
+{
     /* First start only: bring up peripherals from THIS task so their interrupts land
      * on core 1 (esp_intr_alloc pins to the calling core), insulating the real-time
      * path from core 0's Wi-Fi. A restart reuses them, so skip re-init. */
@@ -276,26 +355,30 @@ static void control_task(void *arg)
         s_periph_ready = true;
     }
 
-    /* Retry the IMU on every (re)start until it succeeds (init is idempotent), so
-     * fixing the wiring and restarting the control task brings it up, no reboot. */
+    /* Retry the IMU on every (re)start until it succeeds (init is idempotent and also
+     * configures the FIFO + GPIO34 INT), so fixing the wiring and restarting brings it
+     * up without a reboot. */
     if (!s_imu_present) {
         s_imu_present = mpu6050_init();
         if (!s_imu_present) {
-            ESP_LOGW(TAG, "no IMU - balance disabled, skipping IMU reads; motors + "
-                          "encoders still run (check wiring at SDA=21 SCL=22, then "
-                          "restart the control task to retry)");
+            ESP_LOGW(TAG, "no IMU - balance disabled; motors + encoders still run "
+                          "(check wiring at SDA=21 SCL=22, then restart to retry)");
         }
     }
 
-    /* Start the GPTimer from THIS task so its interrupt is pinned to core 1. First
-     * start creates it; a restart re-starts the existing timer. */
-    if (s_timer == NULL) {
-        start_control_timer();
-    } else {
-        ESP_ERROR_CHECK(gptimer_start(s_timer));
-    }
+    /* Spawn the IMU task (one priority below this one). Its handle is stored via the
+     * out-param before it runs - and before its timer starts below - so on_imu_alarm
+     * never notifies a NULL handle. It blocks on its notify until the timer fires. */
+    xTaskCreatePinnedToCore(imu_task, "imu", 4096, NULL,
+                            configMAX_PRIORITIES - 3, &s_imu_task, 1);
 
-    imu_t imu = { 0 };             /* latest IMU sample */
+    /* GPTimers pinned to core 1: 250 Hz for the IMU task, 500 Hz here. First start
+     * creates them; a restart re-starts the existing timers. */
+    if (s_imu_timer == NULL) start_timer(&s_imu_timer, IMU_ALARM_COUNT, on_imu_alarm);
+    else                     ESP_ERROR_CHECK(gptimer_start(s_imu_timer));
+    if (s_timer == NULL)     start_timer(&s_timer, ALARM_COUNT, on_motor_alarm);
+    else                     ESP_ERROR_CHECK(gptimer_start(s_timer));
+
     /* Ring buffer of the last VEL_WIN ticks' counts + timestamps (windowed speed). */
     int64_t vel_hist_t[VEL_WIN] = { 0 };
     int64_t vel_hist[2][VEL_WIN] = { { 0 } };
@@ -304,84 +387,33 @@ static void control_task(void *arg)
     int64_t last_us = esp_timer_get_time();   /* timestamp of the previous tick */
     bool    primed = false;        /* skip the warning check on the first tick */
     bool    ctrl_was = false;      /* previous tick's controller-enabled state */
-    bool    bal_was  = false;      /* previous tick's balance-enabled state */
-    uint32_t slow_count = 0;       // ticks since the last sub-rate (BALANCE_HZ) fire
-    int64_t  slow_dt_us = 0;       // time accumulated since that fire [us]
-    bool     bal_cut   = false;    // latched: motors cut because tilt exceeded the limit
-    uint32_t imu_fail_streak = 0;  // consecutive failed reads; drops the IMU past the limit
-    float    roll = NAN, pitch = NAN;  // latest estimate [rad], held between sub-rate fires
-    uint32_t rpt_count = 0;        // ticks since the last recorded telemetry sample
+    bool    cut_was  = false;      /* previous tick's balance-cut state */
+    imu_t   pub_imu = { 0 };       /* last consistent snapshot from imu_task (telemetry) */
+    float   pub_roll = NAN, pub_pitch = NAN;
+    uint32_t rpt_count = 0;        /* ticks since the last recorded telemetry sample */
     int     active = 0;            /* buffer we are currently writing into */
     int     idx = 0;               /* next slot in the active buffer */
 
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint32_t nt = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        /* STOP_CONTROL requested: break at a safe point (never mid-I2C) for cleanup below. */
+        /* STOP_CONTROL requested: break at a safe point for cleanup below. */
         if (s_stop_req) break;
 
         int64_t now_us = esp_timer_get_time();
         int32_t dt_us  = (int32_t)(now_us - last_us);
         last_us = now_us;
 
-        /* Check this tick's period; out-of-range only stashes a value for the reporter. */
-        if (primed && (dt_us > DT_MAX_WARN_US || dt_us < DT_MIN_WARN_US)) {
-            s_warn_dt_us = dt_us;
-            s_warn_count++;
+        /* nt > 1 means the scheduler didn't run us for a few ticks: run the latest once
+         * and count the rest. Period out-of-range only stashes a value for the reporter. */
+        if (primed) {
+            if (nt > 1) s_motor_missed += nt - 1;
+            if (dt_us > DT_MAX_WARN_US || dt_us < DT_MIN_WARN_US) {
+                s_warn_dt_us = dt_us;
+                s_warn_count++;
+            }
         }
         primed = true;
-
-        /* Sub-rate gate (BALANCE_HZ) for the IMU read, estimator and balance; slow_dt is
-         * their true accumulated period. Wheel loop and telemetry stay at CONTROL_HZ. */
-        slow_dt_us += dt_us;
-        bool  slow_tick = (++slow_count >= BALANCE_DIV);
-        float slow_dt   = 0.0f;
-        if (slow_tick) {
-            slow_count = 0;
-            slow_dt    = (slow_dt_us > 0) ? (float)slow_dt_us * 1e-6f
-                                          : (float)BALANCE_DIV / (float)CONTROL_HZ;
-            slow_dt_us = 0;
-        }
-
-        /* Read the IMU on sub-rate ticks (~0.5 ms blocking I2C). On failure/timeout hold
-         * the last good sample and flag it stale; with no IMU we never touch the bus. */
-        if (slow_tick && s_imu_present) {
-            int64_t imu_t0    = esp_timer_get_time();
-            imu_t   imu_fresh = mpu6050_read();
-            int32_t imu_us    = (int32_t)(esp_timer_get_time() - imu_t0);
-            if (imu_us > s_warn_imu_us) s_warn_imu_us = imu_us;
-            if (imu_fresh.ok) {
-                imu = imu_fresh;       /* fresh sample */
-                imu_fail_streak = 0;
-            } else {
-                imu.ok = false;        /* keep last good ax..gz, flag stale (estimator holds) */
-                s_imu_stale_count++;
-                /* A long run of failures means the IMU is gone (unplugged/dead). Drop it so
-                 * we stop hammering the bus and balance disables; a control restart re-inits.
-                 * The reporter task surfaces the event to the web terminal (off the RT path). */
-                if (++imu_fail_streak > IMU_FAIL_LIMIT) {
-                    s_imu_present  = false;
-                    s_imu_lost_evt = true;
-                    imu_fail_streak = 0;
-                }
-            }
-        } else if (slow_tick) {
-            imu.ok = false;            /* no IMU: no read, no estimate, no balance */
-        }
-
-        // Gyro-bias calibration when armed; before the estimator so it re-seeds same tick.
-        if (slow_tick && s_gc_active) gyrocal_step(imu);
-
-        /* Complementary-filter tilt estimate, held between sub-rate fires. NaN when
-         * estimation is off, no IMU, or not yet seeded. */
-        if (slow_tick) {
-            if (!s_est_enabled || !s_imu_present) {
-                estimator_reset();
-                roll = NAN; pitch = NAN;
-            } else if (!estimator_update(imu, slow_dt, &roll, &pitch)) {
-                roll = NAN; pitch = NAN;   /* not seeded yet */
-            }
-        }
 
         /* Wheel angular speed (rad/s), before the command decision so the controller
          * can use it this tick. Finite difference over a VEL_WIN-sample window using
@@ -414,45 +446,28 @@ static void control_task(void *arg)
             if (!ctrl_was) wheel_pi_reset();
             float dt = (dt_us > 0) ? (float)dt_us * 1e-6f : (1.0f / (float)CONTROL_HZ);
 
-            /* Balance (outer) loop: turn the estimated tilt into a common wheel-speed
-             * setpoint both inner loops track. If tilt exceeds BALANCE_MAX_TILT the
-             * catch strategy can't recover, so cut the motors rather than lunge. */
+            /* Balance runs in imu_task; here we just consume its published common
+             * setpoint + fall-cut flag (ZOH) every tick. On a cut, zero the wheels and
+             * reset the PI once so it doesn't wind up while parked. */
             bool balance_cut = false;
             if (s_bal_enabled) {
-                /* Rising edge: clear state. */
-                if (!bal_was) {
-                    balance_pid_reset();
-                    bal_cut = false;
+                if (s_bal_cut) {
+                    balance_cut = true;
+                } else {
+                    float w = s_bal_w_common;
+                    wheel_pi_set_setpoint(0, w);
+                    wheel_pi_set_setpoint(1, w);
                 }
-                /* Fires on the sub-rate tick (fresh estimate, slow_dt period so Ki stays
-                 * correct); setpoints held (ZOH) between fires, inner loops track every tick. */
-                if (slow_tick) {
-                    bool have_theta = s_imu_present && s_est_enabled && isfinite(pitch);
-                    if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
-                        float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
-                        float w_common  = balance_pid_step(pitch, theta_dot, slow_dt);
-                        wheel_pi_set_setpoint(0, w_common);
-                        wheel_pi_set_setpoint(1, w_common);
-                        bal_cut = false;
-                    } else {
-                        balance_pid_reset();
-                        wheel_pi_reset();
-                        wheel_pi_set_setpoint(0, 0.0f);
-                        wheel_pi_set_setpoint(1, 0.0f);
-                        bal_cut = true;
-                    }
-                }
-                /* Hold the last cut decision between updates so a fallen robot stays cut. */
-                balance_cut = bal_cut;
             }
 
             if (balance_cut) {
+                if (!cut_was) wheel_pi_reset();
                 cmdL = 0.0f;
                 cmdR = 0.0f;
             } else {
                 /* Per-wheel PI + deadband + anti-windup -> duty; dt is the measured
                  * period so gains stay correct under jitter. Setpoints come from the
-                 * outer loop (balancing) or the 'speed' command. */
+                 * balance loop (above) or the 'speed' command. */
                 wsetL = wheel_pi_setpoint(0);
                 wsetR = wheel_pi_setpoint(1);
                 cmdL = wheel_pi_step(0, velL, dt);
@@ -460,6 +475,7 @@ static void control_task(void *arg)
                 rawL = wheel_pi_raw(0);
                 rawR = wheel_pi_raw(1);
             }
+            cut_was = balance_cut;
         } else if (s_db_active) {
             /* Deadband sweep takes priority over playback/manual while running. */
             deadband_step(now_us, &cmdL, &cmdR);
@@ -487,28 +503,28 @@ static void control_task(void *arg)
         motor_set(0, cmdL);
         motor_set(1, cmdR);
         ctrl_was = s_ctrl_enabled;
-        bal_was  = s_bal_enabled;
 
         /* Record telemetry every REPORT_DIV-th tick (REPORT_HZ) to cut streamed data;
-         * control still runs full rate. Wheel angle is the continuous count; speeds reuse
-         * the values above. wsetL/wsetR are the closed-loop setpoints (NaN when open). */
+         * control still runs full rate. The IMU sample + estimate come from imu_task
+         * via the seqlock; a torn read keeps the previous snapshot. */
         if (++rpt_count >= REPORT_DIV) {
             rpt_count = 0;
+            imu_pub_try_read(&pub_imu, &pub_roll, &pub_pitch);
             sample_t *smp = &s_buf[active][idx];
             smp->t_us = now_us;
             smp->posL = (float)encoder_angle_rad(0);
             smp->posR = (float)encoder_angle_rad(1);
             smp->velL = velL;
             smp->velR = velR;
-            smp->roll  = roll;
-            smp->pitch = pitch;
+            smp->roll  = pub_roll;
+            smp->pitch = pub_pitch;
             smp->wsetL = wsetL;
             smp->wsetR = wsetR;
             smp->rawL   = rawL;
             smp->rawR   = rawR;
             smp->mL   = cmdL;
             smp->mR   = cmdR;
-            smp->imu  = imu;
+            smp->imu  = pub_imu;
 
             /* Buffer full: hand it to the reporter (timeout 0, never blocks) and swap
              * halves. If the reporter fell behind we drop this batch, never stall. */
@@ -521,23 +537,133 @@ static void control_task(void *arg)
             }
         }
 
-        /* Compute-budget watchdog: time this tick's work; keep the worst for the
-         * reporter. Over 90% of the period means we're one hiccup from missing a tick. */
+        /* Compute-budget watchdog: time this tick's work; sum it for the average and
+         * keep the worst for the reporter. Over RUN_WARN_US (an absolute ceiling well
+         * above the lean motor loop's norm) flags a real compute regression. */
         int32_t run_us = (int32_t)(esp_timer_get_time() - now_us);
+        s_motor_run_sum += (uint32_t)run_us;
+        s_motor_run_cnt++;
         if (run_us > RUN_WARN_US) {
             if (run_us > s_warn_run_us) s_warn_run_us = run_us;
             s_warn_run_count++;
         }
     }
 
-    /* STOP_CONTROL only: stop the timer so the ISR can't notify a deleted task,
-     * park the motors, then self-delete. A restart creates a fresh task on the same timer. */
+    /* STOP: stop the 500 Hz timer (so its ISR can't notify a deleted task), park the
+     * motors, then self-delete. imu_task stops its own timer and exits on s_stop_req. */
     ESP_ERROR_CHECK(gptimer_stop(s_timer));
     motor_set(0, 0.0f);
     motor_set(1, 0.0f);
-    s_control_task = NULL;
-    s_stop_req     = false;
-    s_mode         = STOP_CONTROL;
+    s_motor_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/* 250 Hz task (core 1, one priority below motor_task). Owns the blocking MPU6050 read,
+ * the complementary filter and the balance PID; it publishes the common wheel-speed
+ * setpoint + fall-cut for the motor task and a telemetry snapshot. Running below
+ * motor_task means its I2C wait/compute is always preempted and can never delay a motor
+ * tick - the whole point of the split. */
+static void imu_task(void *arg)
+{
+    imu_t    imu = { 0 };                      /* last good sample (held across stale ticks) */
+    int64_t  last_us = esp_timer_get_time();
+    uint32_t last_dr = mpu6050_dr_count();     /* data-ready edges seen so far */
+    uint32_t stale_streak = 0;                 /* consecutive ticks with no fresh sample */
+    bool     primed = false;
+    bool     bal_was = false;
+
+    for (;;) {
+        uint32_t nt = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (s_stop_req) break;
+
+        int64_t now_us = esp_timer_get_time();
+        int32_t dt_us  = (int32_t)(now_us - last_us);
+        last_us = now_us;
+        if (primed && nt > 1) s_imu_missed += nt - 1;   /* ran late: count skipped ticks */
+        primed = true;
+        float dt = (dt_us > 0) ? (float)dt_us * 1e-6f : (1.0f / (float)IMU_HZ);
+
+        /* New samples produced since last tick, straight from the GPIO34 INT counter -
+         * no I2C. Zero => no fresh data this tick (hold last, flag stale). */
+        uint32_t dr = mpu6050_dr_count();
+        uint32_t newn = dr - last_dr;
+        last_dr = dr;
+
+        if (!s_imu_present) {
+            imu.ok = false;
+        } else if (newn == 0) {
+            imu.ok = false;
+            s_imu_stale_count++;
+            /* A long run with no data-ready edge means the IMU is gone (unplugged/dead):
+             * drop it (balance disables); the reporter surfaces it and a restart re-inits. */
+            if (++stale_streak > IMU_FAIL_LIMIT) {
+                s_imu_present = false; s_imu_lost_evt = true; stale_streak = 0;
+            }
+        } else {
+            if (newn > 1) s_imu_skipped += newn - 1;   /* older frames dropped (take-newest) */
+            int64_t t0 = esp_timer_get_time();
+            imu_t fresh;
+            bool  ok = mpu6050_read_newest(&fresh);
+            int32_t rus = (int32_t)(esp_timer_get_time() - t0);
+            if (rus > s_warn_imu_us) s_warn_imu_us = rus;
+            if (ok && fresh.ok) {
+                imu = fresh;
+                stale_streak = 0;
+            } else {
+                imu.ok = false;
+                s_imu_stale_count++;
+                if (++stale_streak > IMU_FAIL_LIMIT) {
+                    s_imu_present = false; s_imu_lost_evt = true; stale_streak = 0;
+                }
+            }
+        }
+
+        // Gyro-bias calibration when armed; before the estimator so it re-seeds same tick.
+        if (s_gc_active) gyrocal_step(imu);
+
+        /* Complementary-filter tilt estimate. NaN when estimation is off, no IMU, or not
+         * yet seeded. dt is the measured period (rate-independent alpha handles it). */
+        float roll = NAN, pitch = NAN;
+        if (!s_est_enabled || !s_imu_present) {
+            estimator_reset();
+        } else if (!estimator_update(imu, dt, &roll, &pitch)) {
+            roll = NAN; pitch = NAN;   /* not seeded yet */
+        }
+
+        /* Publish the estimate + IMU sample for the motor task's telemetry record. */
+        imu_pub_write(&imu, roll, pitch);
+
+        /* Balance (outer) loop -> common wheel-speed setpoint + fall-cut, consumed by the
+         * motor task. Above BALANCE_MAX_TILT the catch can't recover, so cut. Forcing the
+         * cut when disabled keeps a stale setpoint from leaking on the next enable. */
+        if (s_bal_enabled) {
+            if (!bal_was) balance_pid_reset();   /* rising edge: clear the integrator */
+            bool have_theta = s_imu_present && s_est_enabled && isfinite(pitch);
+            if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
+                float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
+                s_bal_w_common = balance_pid_step(pitch, theta_dot, dt);
+                s_bal_cut = false;
+            } else {
+                balance_pid_reset();
+                s_bal_w_common = 0.0f;
+                s_bal_cut = true;
+            }
+        } else {
+            s_bal_w_common = 0.0f;
+            s_bal_cut = true;
+        }
+        bal_was = s_bal_enabled;
+
+        /* Sum this tick's run time (includes the blocking I2C read) + new-sample count
+         * for the reporter's rolling averages. */
+        s_imu_run_sum  += (uint32_t)(esp_timer_get_time() - now_us);
+        s_imu_run_cnt++;
+        s_imu_samp_sum += newn;
+    }
+
+    /* STOP: stop the 250 Hz timer, then self-delete. */
+    ESP_ERROR_CHECK(gptimer_stop(s_imu_timer));
+    s_imu_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -548,49 +674,56 @@ static void emit_pending_warning(void)
     char msg[192];
     char json[288];
 
-    /* Period out of range (tick scheduled early/late). */
-    uint32_t n = s_warn_count;
-    if (n != 0) {
+    /* Motor loop: period out of range (tick scheduled early/late) and/or missed ticks
+     * (ran late, coalesced). Both live on the 500 Hz motor task. */
+    uint32_t n     = s_warn_count;
+    uint32_t mmiss = s_motor_missed;
+    if (n != 0 || mmiss != 0) {
         int32_t dt = s_warn_dt_us;
-        s_warn_count = 0;        /* clear before reporting; races are harmless */
+        s_warn_count   = 0;      /* clear before reporting; races are harmless */
+        s_motor_missed = 0;
         snprintf(msg, sizeof(msg),
-                 "loop timing out of range: %" PRIu32 " tick(s) in the last %d ms, "
-                 "latest dt=%ld us (want ~%d, limits %d..%d)",
-                 n, BATCH_MS, (long)dt,
+                 "motor loop timing: %" PRIu32 " out-of-range, %" PRIu32 " missed tick(s) "
+                 "in the last %d ms, latest dt=%ld us (want ~%d, limits %d..%d)",
+                 n, mmiss, BATCH_MS, (long)dt,
                  CONTROL_PERIOD_US, DT_MIN_WARN_US, DT_MAX_WARN_US);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
         ws_broadcast(json);
     }
 
-    /* Compute budget exceeded. Include the per-phase split (worst IMU read is the
-     * only blocking call) so the message says whether it's the I2C read or the compute. */
+    /* Motor compute budget exceeded. The blocking IMU read now lives in imu_task, so
+     * this is pure motor-loop compute (encoders + wheel PI + telemetry). */
     uint32_t rn = s_warn_run_count;
     if (rn != 0) {
         int32_t run = s_warn_run_us;
         s_warn_run_count = 0;
         s_warn_run_us    = 0;    /* reset the worst-case tracker for next window */
         snprintf(msg, sizeof(msg),
-                 "control task over budget: %" PRIu32 " tick(s) in the last %d ms, "
-                 "worst run=%ld us (limit %d us = 90%% of %d); worst IMU read=%ld us",
-                 rn, BATCH_MS, (long)run,
-                 RUN_WARN_US, CONTROL_PERIOD_US, (long)s_warn_imu_us);
+                 "motor task over budget: %" PRIu32 " tick(s) in the last %d ms, "
+                 "worst run=%ld us (limit %d us, period %d us)",
+                 rn, BATCH_MS, (long)run, RUN_WARN_US, CONTROL_PERIOD_US);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
         ws_broadcast(json);
     }
 
-    /* Stale IMU reads (I2C timed out; held last sample). Reported on its own since
-     * the fast-failing read no longer trips the budget warning. Reset the IMU trackers here. */
-    uint32_t stale = s_imu_stale_count;
+    /* IMU task health: missed 250 Hz ticks, stale ticks (no fresh sample; held last)
+     * and older FIFO frames skipped (take-newest). Emitted only on an anomaly; the
+     * skip/worst-read counters are always reset so they never accumulate. */
+    uint32_t imiss     = s_imu_missed;
+    uint32_t stale     = s_imu_stale_count;
+    uint32_t skipped   = s_imu_skipped;
     int32_t  imu_worst = s_warn_imu_us;
+    s_imu_missed      = 0;
     s_imu_stale_count = 0;
+    s_imu_skipped     = 0;
     s_warn_imu_us     = 0;
-    if (stale != 0) {
+    if (imiss != 0 || stale != 0) {
         snprintf(msg, sizeof(msg),
-                 "IMU read stalled: %" PRIu32 " stale read(s) in the last %d ms "
-                 "(held last sample); worst IMU read=%ld us",
-                 stale, BATCH_MS, (long)imu_worst);
+                 "IMU task: %" PRIu32 " missed, %" PRIu32 " stale (held last), "
+                 "%" PRIu32 " sample(s) skipped in the last %d ms; worst read=%ld us",
+                 imiss, stale, skipped, BATCH_MS, (long)imu_worst);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"warn\",\"text\":\"%s\"}", msg);
         ws_broadcast(json);
@@ -608,17 +741,48 @@ static void emit_pending_warning(void)
         ws_broadcast(json);
     }
 
-    /* IMU dropped after a long failure run: balance is now disabled until a restart. */
+    /* IMU dropped after a long run with no fresh samples: balance is now disabled until
+     * a restart. Most often the data-ready INT wire (GPIO34) is missing, since that is
+     * the liveness signal - so point at it as well as a dead/unplugged sensor. */
     if (s_imu_lost_evt) {
         s_imu_lost_evt = false;
         snprintf(msg, sizeof(msg),
-                 "IMU lost after %d consecutive failed reads - balance disabled; "
-                 "restart the control task to retry",
+                 "IMU lost: no data-ready edges for %d ticks - balance disabled; check the "
+                 "MPU INT wire to GPIO34 (and SDA=21 SCL=22), then restart to retry",
                  IMU_FAIL_LIMIT);
         ESP_LOGW(TAG, "%s", msg);
         snprintf(json, sizeof(json), "{\"type\":\"error\",\"text\":\"%s\"}", msg);
         ws_broadcast(json);
     }
+}
+
+/* Rolling loop-timing averages, ~1 Hz. Averages + resets the per-tick accumulators the
+ * two tasks fill, publishes them for the stats command, and prints one info line so an
+ * occasional out-of-range period can be judged against the norm - the average run time
+ * normally sits well under budget even when a single tick is scheduled early/late. */
+static void emit_loop_stats(void)
+{
+    uint32_t mcnt = s_motor_run_cnt, msum = s_motor_run_sum;
+    uint32_t icnt = s_imu_run_cnt,   isum = s_imu_run_sum, isamp = s_imu_samp_sum;
+    s_motor_run_cnt = 0; s_motor_run_sum = 0;
+    s_imu_run_cnt   = 0; s_imu_run_sum   = 0; s_imu_samp_sum = 0;
+
+    float motor_us = mcnt ? (float)msum / (float)mcnt : 0.0f;
+    float imu_us   = icnt ? (float)isum / (float)icnt : 0.0f;
+    float samples  = icnt ? (float)isamp / (float)icnt : 0.0f;
+    s_stat_motor_run_us = motor_us;
+    s_stat_imu_run_us   = imu_us;
+    s_stat_imu_samples  = samples;
+
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "loop avg over %d ms: motor run=%.0f us, imu run=%.0f us, "
+             "imu samples/tick=%.2f",
+             STATS_MS, (double)motor_us, (double)imu_us, (double)samples);
+    ESP_LOGI(TAG, "%s", msg);
+    char json[256];
+    snprintf(json, sizeof(json), "{\"type\":\"resp\",\"text\":\"%s\"}", msg);
+    ws_broadcast(json);
 }
 
 /* Announce the deadband sweep's four thresholds once the loop finishes, off the
@@ -705,6 +869,13 @@ static void reporter_task(void *arg)
         /* Speak up only if the control loop flagged out-of-range periods. */
         emit_pending_warning();
 
+        /* Publish the rolling loop-timing averages (~1 Hz), for context on the above. */
+        static uint32_t stats_batches = 0;
+        if (++stats_batches >= STATS_DIV) {
+            stats_batches = 0;
+            emit_loop_stats();
+        }
+
         /* Announce the deadband sweep result when the loop has finished one. */
         emit_deadband_result();
 
@@ -742,20 +913,28 @@ static void reporter_task(void *arg)
 
 void control_start(void)
 {
-    /* Ready-buffer index queue. Length 2 so the control task can hand over even
+    /* Ready-buffer index queue. Length 2 so the motor task can hand over even
      * while the reporter is mid-cycle on the previous buffer. */
     s_ready_q = xQueueCreate(2, sizeof(int));
     configASSERT(s_ready_q);
 
     /* Reporter on core 0 (shares with Wi-Fi). If Wi-Fi/WebSocket stalls, only this
-     * task waits; the control loop is unaffected. */
+     * task waits; the control loops are unaffected. */
     xTaskCreatePinnedToCore(reporter_task, "reporter", 4096, NULL, 4, NULL, 0);
 
-    /* Start the control task (created on core 1, brings up peripherals + GPTimer there). */
+    /* Start the motor task (created on core 1; it brings up peripherals + both GPTimers
+     * there and spawns the IMU task). */
     control_set_mode(START_CONTROL);
 }
 
 control_mode_t control_mode(void) { return s_mode; }
+
+void control_loop_stats(float *motor_run_us, float *imu_run_us, float *imu_samples)
+{
+    if (motor_run_us) *motor_run_us = s_stat_motor_run_us;
+    if (imu_run_us)   *imu_run_us   = s_stat_imu_run_us;
+    if (imu_samples)  *imu_samples  = s_stat_imu_samples;
+}
 
 void control_set_mode(control_mode_t mode)
 {
@@ -763,18 +942,22 @@ void control_set_mode(control_mode_t mode)
         if (s_mode == START_CONTROL) return;          /* already running */
         s_stop_req = false;
         s_mode     = START_CONTROL;
-        /* Control loop on core 1, high priority, isolated from core 0's Wi-Fi. */
-        xTaskCreatePinnedToCore(control_task, "control", 4096, NULL,
-                                configMAX_PRIORITIES - 2, NULL, 1);
+        /* Motor loop on core 1, high priority, isolated from core 0's Wi-Fi. It brings up
+         * peripherals + both GPTimers and spawns imu_task. Its handle is set via the
+         * out-param before it runs, so on_motor_alarm never notifies a NULL handle. */
+        xTaskCreatePinnedToCore(motor_task, "motor", 4096, NULL,
+                                configMAX_PRIORITIES - 2, &s_motor_task, 1);
     } else {  /* STOP_CONTROL */
         if (s_mode == STOP_CONTROL) return;           /* already stopped */
-        /* Ask the loop to exit at a safe point (stops timer, parks motors, self-deletes),
-         * then wait (bounded) until it's gone so callers know it stopped on return. */
+        /* Ask both loops to exit at a safe point (each stops its own timer; motor parks
+         * the motors, self-delete), then wait (bounded) until both are gone so callers
+         * know control stopped on return. */
         s_stop_req = true;
-        for (int i = 0; i < 200 && s_control_task != NULL; i++) {
+        for (int i = 0; i < 200 && (s_motor_task != NULL || s_imu_task != NULL); i++) {
             vTaskDelay(pdMS_TO_TICKS(2));
         }
-        s_mode = STOP_CONTROL;
+        s_stop_req = false;
+        s_mode     = STOP_CONTROL;
     }
 }
 

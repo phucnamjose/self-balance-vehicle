@@ -1,31 +1,38 @@
 /**
  * @file control.h
- * @brief Hard real-time control loop (core 1) and telemetry reporter (core 0).
+ * @brief Hard real-time control loops (core 1) and telemetry reporter (core 0).
  *
- * A GPTimer ISR wakes control_task at CONTROL_HZ; it reads the IMU, drives the
- * motors and, once per second, hands a snapshot to reporter_task via a 1-slot
- * mailbox. reporter_task caches it, logs it and streams it to WebSocket clients.
+ * Two core-1 tasks, each woken by its own GPTimer ISR: motor_task at CONTROL_HZ
+ * (encoders, wheel PI, motor output, telemetry - never touches I2C) and the lower
+ * priority imu_task at IMU_HZ (MPU6050 read, estimator, balance PID). imu_task
+ * publishes the common wheel-speed setpoint the motor loop tracks. motor_task hands a
+ * batch to reporter_task (core 0), which caches, logs and streams it to WebSocket clients.
  */
 #pragma once
 
 #include <stdbool.h>
 
-/* Control-task lifecycle modes. */
+/* Control lifecycle modes (apply to both core-1 tasks together). */
 typedef enum {
-    STOP_CONTROL,    /* control task fully stopped (deleted, not suspended), motors off */
-    START_CONTROL,   /* control task running */
+    STOP_CONTROL,    /* both tasks fully stopped (deleted, not suspended), motors off */
+    START_CONTROL,   /* both tasks running */
 } control_mode_t;
 
-/* Create the telemetry mailbox + reporter task and start the control task
+/* Create the telemetry queue + reporter task and start the control tasks
  * (START_CONTROL). Call once at boot after the web server is up. */
 void control_start(void);
 
 /* Current lifecycle mode. */
 control_mode_t control_mode(void);
 
-/* Switch lifecycle mode. STOP_CONTROL deletes the task at a safe point and forces
- * the motors off (required before an OTA flash); START_CONTROL (re)starts it.
- * Peripherals and the GPTimer are initialised once and reused across restarts. */
+/* Rolling loop-timing averages from the last ~1 s window: mean motor- and IMU-task run
+ * time [us] and mean new IMU samples per IMU tick (~2 at 500 Hz sampling / 250 Hz read).
+ * Any pointer may be NULL. Also printed periodically to the log + web terminal. */
+void control_loop_stats(float *motor_run_us, float *imu_run_us, float *imu_samples);
+
+/* Switch lifecycle mode. STOP_CONTROL deletes both tasks at a safe point and forces
+ * the motors off (required before an OTA flash); START_CONTROL (re)starts them.
+ * Peripherals and the GPTimers are initialised once and reused across restarts. */
 void control_set_mode(control_mode_t mode);
 
 /* Experiment presets for bring-up/research: each sets the feature flags below to a

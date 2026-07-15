@@ -14,7 +14,7 @@ We target a generic **ESP32 DevKit** (ESP32-WROOM-32, 4 MB flash) - the common
 
 | Parameter | Value | Why it matters here |
 |-----------|-------|---------------------|
-| CPU | Dual-core Xtensa LX6 @ 240 MHz | One core runs the control loop, the other runs Wi-Fi/HTTP - no contention |
+| CPU | Dual-core Xtensa LX6 @ 240 MHz | One core runs the control loops (motor + IMU tasks), the other runs Wi-Fi/HTTP - no contention |
 | RAM | 520 KB SRAM | Comfortable for FreeRTOS + Wi-Fi stack + our buffers |
 | Flash | 4 MB (typical) | Fits two 1.5 MB OTA app slots (see `partitions.csv`) |
 | Wi-Fi | 802.11 b/g/n | Hosts a SoftAP for the dashboard + OTA - no USB cable needed |
@@ -22,7 +22,7 @@ We target a generic **ESP32 DevKit** (ESP32-WROOM-32, 4 MB flash) - the common
 | Logic level | **3.3 V** | All GPIOs are 3.3 V; **not 5 V tolerant** - feed sensors/encoders 3.3 V logic |
 | GPIO current | ~12 mA typical / 40 mA abs max per pin | Drive logic, not motors - motors go through the XY-160D |
 | ADC / DAC | 18 ch ADC, 2 ch DAC | Available for battery-voltage sensing later |
-| Timers | 4 hardware (GPTimer) + PCNT + LEDC | We use GPTimer (loop tick), LEDC (motor PWM), PCNT (encoders) |
+| Timers | 4 hardware (GPTimer) + PCNT + LEDC | Two GPTimers (500 Hz motor tick, 250 Hz IMU tick), LEDC (motor PWM), PCNT (encoders) |
 
 ---
 
@@ -63,6 +63,7 @@ Our committed pin allocation. Anything not listed is free for later use.
 | 27 | Motor L IN2 (dir) | Direction output |
 | 32 | Motor R IN3 (dir) | Direction output |
 | 33 | Motor R ENB (PWM) | LEDC channel |
+| 34 | MPU6050 INT (data-ready) | Input-only; push-pull INT, no pull-up needed |
 | 1, 3 | UART0 TX/RX | USB serial console + flashing - leave alone |
 | 6-11 | SPI flash | **Reserved - do not use** |
 
@@ -74,7 +75,9 @@ Our committed pin allocation. Anything not listed is free for later use.
 - **Input-only pins** (34, 35, 36, 39): no output drivers **and no internal
   pull-ups/pull-downs**. We avoided them for encoders because open-collector
   encoder outputs need a pull-up - regular GPIOs (13/18/19/23) give us that for
-  free.
+  free. We *do* use **GPIO34** for the MPU6050 data-ready interrupt: the MPU drives
+  that line push-pull (actively high and low), so no pull-up is needed and
+  input-only is fine.
 - **GPIO16 / 17**: free on WROOM, but used for PSRAM on WROVER modules. We drive
   the Right (16) and Left (17) notification LEDs here, so use a WROOM module.
 - All pins are **3.3 V**. Anything feeding a GPIO (sensor, encoder) must use 3.3 V
@@ -97,7 +100,7 @@ Our project's use is shown next to each pin.
                    EN        2          37   GPIO23  R enc A
         GPIO36 VP (in)       3          36   GPIO22  I2C SCL
         GPIO39 VN (in)       4          35   GPIO1   TX0 (serial)
-        GPIO34    (in)       5          34   GPIO3   RX0 (serial)
+        GPIO34  MPU INT      5          34   GPIO3   RX0 (serial)
         GPIO35    (in)       6          33   GPIO21  I2C SDA
         GPIO32  R IN3        7          32   GND
         GPIO33  R PWM        8          31   GPIO19  L enc B

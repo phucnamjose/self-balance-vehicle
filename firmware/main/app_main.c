@@ -2,7 +2,8 @@
  * @file app_main.c
  * @brief Boot orchestration: wires up the per-subsystem modules.
  *
- * Core 1 runs the hard real-time control_task (GPTimer ISR -> read MPU6050 -> PWM).
+ * Core 1 runs the hard real-time control loops: motor_task (500 Hz PWM/encoders) and
+ * imu_task (250 Hz MPU6050 read + estimator + balance), each on its own GPTimer.
  * Core 0 runs Wi-Fi + the HTTP/WebSocket server + reporter_task, which streams
  * telemetry (/ws) and accepts OTA uploads (/ota). The robot hosts its own AP;
  * connect and open http://192.168.4.1/ for a live log + command terminal.
@@ -43,7 +44,7 @@ void app_main(void)
 
     led_init();     /* Left/Right LEDs for notifications (core 0 heartbeat only) */
 
-    /* Encoders, motors and I2C+MPU6050 are brought up in control_task (core 1) so
+    /* Encoders, motors and I2C+MPU6050 are brought up in motor_task (core 1) so
      * their interrupts stay off core 0's Wi-Fi. Only the LED (above) is on core 0. */
 
     /* Cached telemetry snapshot shared with the web server. */

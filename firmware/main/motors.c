@@ -44,7 +44,7 @@ static const motor_t s_motors[2] = {
 };
 
 /* Open-loop command per motor, -1.0..+1.0 (sign = direction). Set from the web
- * terminal, applied by control_task each tick. */
+ * terminal, applied by motor_task each tick. */
 static volatile float s_motor_cmd[2];
 
 void motor_cmd_set(int i, float cmd) { s_motor_cmd[i] = cmd; }

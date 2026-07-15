@@ -387,17 +387,21 @@ static void handle_command(httpd_req_t *req, const char *cmd)
     } else if (strcmp(cmd, "stats") == 0) {
         char json[512];
         int n = telemetry_latest_json(json, sizeof(json), "resp_stats");
-        /* Splice the current modes in before the closing brace. */
+        /* Splice the current modes + loop-timing averages in before the closing brace. */
         if (n > 0 && n < (int)sizeof(json) && json[n - 1] == '}') {
+            float mrun = 0, irun = 0, isamp = 0;
+            control_loop_stats(&mrun, &irun, &isamp);
             snprintf(json + n - 1, sizeof(json) - (n - 1),
                      ",\"cmode\":\"%s\",\"est\":%d,\"mctrl\":%d,\"bal\":%d,"
-                     "\"play\":%d,\"play_pos\":%d,\"play_len\":%d}",
+                     "\"play\":%d,\"play_pos\":%d,\"play_len\":%d,"
+                     "\"mrun\":%.0f,\"irun\":%.0f,\"isamp\":%.2f}",
                      control_mode() == START_CONTROL ? "START_CONTROL" : "STOP_CONTROL",
                      control_estimation_enabled() ? 1 : 0,
                      control_controller_enabled() ? 1 : 0,
                      control_balance_enabled() ? 1 : 0,
                      control_playback_active() ? 1 : 0,
-                     control_playback_pos(), control_playback_len());
+                     control_playback_pos(), control_playback_len(),
+                     (double)mrun, (double)irun, (double)isamp);
         }
         ws_send_text(req, json);
     } else if (strcmp(cmd, "stream on") == 0) {

@@ -476,8 +476,10 @@
           let mode = d.cmode !== undefined
             ? ` mode=${d.cmode} est=${on(d.est)} mctrl=${on(d.mctrl)}${d.bal !== undefined ? ` bal=${on(d.bal)}` : ''}` : '';
           if (d.play_len) mode += ` play=${d.play_pos}/${d.play_len}${d.play ? '(running)' : ''}`;
+          const loop = (d.mrun !== undefined)
+            ? ` run=[mot ${d.mrun.toFixed(0)} imu ${d.irun.toFixed(0)}]us imu_smp/tick=${d.isamp.toFixed(2)}` : '';
           add(`stats: rate=${d.rate}Hz mot=[${(d.mL * 100).toFixed(0)} ${(d.mR * 100).toFixed(0)}]% ` +
-              `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}${mode}`, 'resp');
+              `enc=[${d.posL.toFixed(3)} ${d.posR.toFixed(3)}]rad vel=[${f2(d.velL)} ${f2(d.velR)}]rad/s${imu}${loop}${mode}`, 'resp');
         } else if (d.type === 'warn') {
           add('WARN: ' + d.text, 'warn');
         } else if (d.type === 'error') {
