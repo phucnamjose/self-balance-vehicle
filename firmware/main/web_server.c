@@ -112,6 +112,9 @@ static void handle_command(httpd_req_t *req, const char *cmd)
             "gains <l|r|both> <kp> <ki>    - set/report PI gains (gains default resets)\\n"
             "dbcomp on|off                 - controller deadband compensation\\n"
             "ff on|off                     - controller feedforward (u=w_set/K)\\n"
+            "bweight <0..1>                - PI setpoint weight (lower cuts step overshoot)\\n"
+            "slew <rad/s^2>                - setpoint slew-rate limit (0 = off; tames step kick)\\n"
+            "tauf <s>                      - speed measurement low-pass (0 = off; higher = more lag)\\n"
             "control start|stop            - start/stop the control task\\n"
             "exp motors|motor-ctrl|angles|balance - experiment preset\\n"
             "est on|off                    - angle estimation\\n"
@@ -120,13 +123,13 @@ static void handle_command(httpd_req_t *req, const char *cmd)
             "balance on|off                - self-balance loop (also enables est+ctrl)\\n"
             "bgains <kp> <ki> <kd>         - set/report balance PID (bgains default resets)\\n"
             "btrim <rad>                   - balance upright trim (theta_ref)\\n"
-            "play | play stop              - run/stop uploaded motor script\\n"
+            "play | play stop              - run/stop uploaded script (duty or speed)\\n"
             "deadband | deadband stop      - run/stop deadband sweep\\n"
             "gyrocal                       - average gyro at rest, store zero-rate bias\\n"
             "enc reset                     - zero encoder counts\\n"
             "stream on|off                 - telemetry streaming\\n"
             "rollback                      - boot the previous OTA slot";
-        char buf[1800];
+        char buf[2048];
         snprintf(buf, sizeof(buf), "{\"type\":\"resp\",\"text\":\"%s\"}", help);
         ws_send_text(req, buf);
     } else if (strcmp(cmd, "exp motors") == 0) {
@@ -241,7 +244,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         snprintf(msg, sizeof(msg), "playback: step %d/%d, %s",
                  control_playback_pos(), control_playback_len(),
                  control_playback_active() ? "running" :
-                     (control_playback_len() ? "idle" : "empty (POST /motorseq)"));
+                     (control_playback_len() ? "idle" : "empty (POST /motorseq or /speedseq)"));
         ws_reply(req, msg);
     } else if (strcmp(cmd, "enc reset") == 0) {
         encoder_reset(0);
@@ -345,6 +348,45 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         ws_reply(req, on ? "feedforward ON" : "feedforward OFF");
     } else if (strcmp(cmd, "ff") == 0) {
         ws_reply(req, wheel_pi_ff() ? "feedforward is ON" : "feedforward is OFF");
+    } else if (strncmp(cmd, "bweight", 7) == 0) {
+        /* Proportional setpoint weight: "bweight 0.3" sets, "bweight" reports. Lower b
+         * trims setpoint-step overshoot; steady state, poles and margins are unchanged. */
+        float b;
+        if (sscanf(cmd + 7, "%f", &b) == 1) {
+            wheel_pi_set_bweight(b);
+        }
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "PI setpoint weight b = %.2f (1 = plain PI, lower cuts step overshoot)",
+                 (double)wheel_pi_bweight());
+        ws_reply(req, msg);
+    } else if (strncmp(cmd, "slew", 4) == 0) {
+        /* Setpoint slew-rate limit: "slew 150" sets rad/s^2, "slew 0" disables, "slew"
+         * reports. Ramps the setpoint so P sees no step kick; the recommended overshoot fix. */
+        float r;
+        if (sscanf(cmd + 4, "%f", &r) == 1) {
+            wheel_pi_set_slew(r);
+        }
+        char msg[96];
+        float cur = wheel_pi_slew();
+        if (cur > 0.0f)
+            snprintf(msg, sizeof(msg), "setpoint slew = %.0f rad/s^2 (ramps the setpoint; 0 = off)",
+                     (double)cur);
+        else
+            snprintf(msg, sizeof(msg), "setpoint slew = off (setpoint applied instantly)");
+        ws_reply(req, msg);
+    } else if (strncmp(cmd, "tauf", 4) == 0) {
+        /* Speed measurement low-pass: "tauf 0.02" sets seconds, "tauf 0" disables, "tauf"
+         * reports. Higher smooths the noisy encoder speed but adds lag (more overshoot). */
+        float tf;
+        if (sscanf(cmd + 4, "%f", &tf) == 1) {
+            wheel_pi_set_tau_f(tf);
+        }
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "speed meas filter tau_f = %.4f s (0 = off; higher = smoother, more lag)",
+                 (double)wheel_pi_tau_f());
+        ws_reply(req, msg);
     } else if (strcmp(cmd, "stop") == 0) {
         /* Motor-test stop: zero the outputs (task keeps running, not STOP_CONTROL).
          * Also park the wheel setpoint so a re-enabled controller starts from rest. */
@@ -607,17 +649,25 @@ static esp_err_t ota_options_handler(httpd_req_t *req)
  * exhaust the heap. */
 #define SEQ_MAX_BODY  (96 * 1024)
 
-/* POST /motorseq - import + play a step-based open-loop motor script. Body is plain
- * text, one step per line "dur,mL,mR" (dur > 0 s, mL,mR in -1..+1); blank/# lines are
- * ignored. Only in START_CONTROL + TEST_MOTORS; the loop plays each step, then parks. */
-static esp_err_t motorseq_post_handler(httpd_req_t *req)
+/* Import + play a step-based script. Body is plain text, one step per line "dur,vL,vR"
+ * (dur > 0 s); blank/# lines are ignored. @p speed picks the target:
+ *   false (/motorseq)  - open-loop duty (-1..+1), needs START_CONTROL + TEST_MOTORS
+ *   true  (/speedseq)  - wheel-speed setpoints (rad/s) into the PI, needs
+ *                        START_CONTROL + TEST_MOTOR_CONTROLLERS (balance off)
+ * The loop plays each step in turn, then parks / zeroes the setpoints. */
+static esp_err_t seq_import(httpd_req_t *req, bool speed)
 {
-    if (control_mode() != START_CONTROL ||
-        control_estimation_enabled() || control_controller_enabled()) {
+    bool ok_mode = control_mode() == START_CONTROL &&
+                   (speed ? (control_controller_enabled() && !control_balance_enabled())
+                          : (!control_estimation_enabled() && !control_controller_enabled()));
+    if (!ok_mode) {
         set_cors(req);
         httpd_resp_set_status(req, "403 Forbidden");
-        httpd_resp_sendstr(req, "motor sequence needs START_CONTROL + TEST_MOTORS "
-                                "(send 'control start' and 'exp motors')");
+        httpd_resp_sendstr(req, speed
+            ? "speed script needs START_CONTROL + TEST_MOTOR_CONTROLLERS "
+              "(send 'control start' and 'exp motor-ctrl')"
+            : "motor script needs START_CONTROL + TEST_MOTORS "
+              "(send 'control start' and 'exp motors')");
         return ESP_OK;
     }
 
@@ -650,28 +700,28 @@ static esp_err_t motorseq_post_handler(httpd_req_t *req)
     /* Commas -> spaces so a single "%f %f" scan handles CSV and whitespace. */
     for (int i = 0; i < total; i++) if (body[i] == ',') body[i] = ' ';
 
-    control_playback_begin();
+    control_playback_begin(speed ? PLAY_SPEED : PLAY_DUTY);
     int loaded = 0, bad = 0, truncated = 0;
     float total_s = 0.0f;
     char *save = NULL;
     for (char *ln = strtok_r(body, "\r\n", &save); ln; ln = strtok_r(NULL, "\r\n", &save)) {
         while (*ln == ' ' || *ln == '\t') ln++;
         if (*ln == '\0' || *ln == '#') continue;          /* blank / comment */
-        float dur, mL, mR;
-        if (sscanf(ln, "%f %f %f", &dur, &mL, &mR) != 3) { bad++; continue; }
-        int r = control_playback_append(dur, mL, mR);
-        if (r == -1) { truncated = 1; break; }             /* buffer full */
+        float dur, vL, vR;
+        if (sscanf(ln, "%f %f %f", &dur, &vL, &vR) != 3) { bad++; continue; }
+        int r = control_playback_append(dur, vL, vR);
+        if (r == -1 || r == -3) { truncated = 1; break; }  /* step array full or 1-min cap */
         if (r == -2) { bad++; continue; }                  /* non-positive duration */
         total_s += dur;
         loaded++;
     }
     free(body);
 
-    char msg[160];
+    char msg[176];
     if (loaded == 0) {
-        control_playback_begin();
+        control_playback_begin(speed ? PLAY_SPEED : PLAY_DUTY);
         snprintf(msg, sizeof(msg), "no valid rows (skipped %d bad line(s); "
-                 "expected 'dur,mL,mR' with dur > 0)", bad);
+                 "expected 'dur,%s' with dur > 0)", bad, speed ? "wL,wR" : "mL,mR");
         set_cors(req);
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, msg);
@@ -680,17 +730,23 @@ static esp_err_t motorseq_post_handler(httpd_req_t *req)
 
     control_playback_start();
     snprintf(msg, sizeof(msg),
-             "loaded %d steps (%.2f s total), skipped %d bad; playing now%s",
-             loaded, (double)total_s, bad,
-             truncated ? " (truncated: max 20 steps)" : "");
-    ESP_LOGI(TAG, "motorseq: %s", msg);
+             "loaded %d %s steps (%.2f s total), skipped %d bad; playing now%s",
+             loaded, speed ? "speed" : "duty", (double)total_s, bad,
+             truncated ? " (truncated: max 1 minute / 128 steps)" : "");
+    ESP_LOGI(TAG, "%s: %s", speed ? "speedseq" : "motorseq", msg);
     set_cors(req);
     httpd_resp_sendstr(req, msg);
     return ESP_OK;
 }
 
-/* CORS preflight for /motorseq (cross-origin POST). */
-static esp_err_t motorseq_options_handler(httpd_req_t *req)
+/* POST /motorseq - open-loop duty script (TEST_MOTORS). */
+static esp_err_t motorseq_post_handler(httpd_req_t *req) { return seq_import(req, false); }
+
+/* POST /speedseq - wheel-speed setpoint script (TEST_MOTOR_CONTROLLERS). */
+static esp_err_t speedseq_post_handler(httpd_req_t *req) { return seq_import(req, true); }
+
+/* CORS preflight shared by /motorseq and /speedseq (cross-origin POST). */
+static esp_err_t seq_options_handler(httpd_req_t *req)
 {
     set_cors(req);
     httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -733,8 +789,16 @@ void start_webserver(void)
     httpd_register_uri_handler(s_httpd, &seq);
 
     httpd_uri_t seq_opt = { .uri = "/motorseq", .method = HTTP_OPTIONS,
-                            .handler = motorseq_options_handler };
+                            .handler = seq_options_handler };
     httpd_register_uri_handler(s_httpd, &seq_opt);
+
+    httpd_uri_t sseq = { .uri = "/speedseq", .method = HTTP_POST,
+                         .handler = speedseq_post_handler };
+    httpd_register_uri_handler(s_httpd, &sseq);
+
+    httpd_uri_t sseq_opt = { .uri = "/speedseq", .method = HTTP_OPTIONS,
+                             .handler = seq_options_handler };
+    httpd_register_uri_handler(s_httpd, &sseq_opt);
 
     ESP_LOGI(TAG, "HTTP + WebSocket + OTA server up");
 }

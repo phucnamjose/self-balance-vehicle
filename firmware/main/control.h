@@ -57,12 +57,17 @@ void control_set_controller(bool on);
 bool control_balance_enabled(void);
 void control_set_balance(bool on);
 
-/* Scripted open-loop motor playback (TEST_MOTORS only): a list of steps, each
- * "hold (mL,mR) for dur seconds". Fill incrementally: begin() clears, append()
- * adds a step (returns the new count, -1 full, -2 if dur <= 0), start() plays,
- * stop() halts and parks. active()/len()/pos() report progress. */
-void control_playback_begin(void);
-int  control_playback_append(float dur, float mL, float mR);
+/* Scripted playback: a list of timed steps "hold (vL,vR) for dur seconds", replayed
+ * by the motor loop. The kind selects how each step's values are applied:
+ *   PLAY_DUTY  - open-loop duty (-1..1), TEST_MOTORS (controller off)
+ *   PLAY_SPEED - wheel-speed setpoints (rad/s) fed to the PI, TEST_MOTOR_CONTROLLERS
+ * Fill incrementally: begin(kind) clears + sets the kind, append() adds a step
+ * (returns the new count; -1 step array full, -2 if dur <= 0, -3 if it would exceed the
+ * 1-minute total cap), start() plays, stop() halts and zeroes the output.
+ * active()/len()/pos() report progress. */
+typedef enum { PLAY_DUTY, PLAY_SPEED } playback_kind_t;
+void control_playback_begin(playback_kind_t kind);
+int  control_playback_append(float dur, float vL, float vR);
 void control_playback_start(void);
 void control_playback_stop(void);
 bool control_playback_active(void);

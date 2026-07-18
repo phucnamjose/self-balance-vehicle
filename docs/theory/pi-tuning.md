@@ -182,6 +182,14 @@ $-90^\circ_{\,\text{(integrator)}} - 4^\circ_{\,\text{(delay)}} - 25^\circ_{\,\t
 i.e. $\mathrm{PM} \approx 60^\circ$ - the finite margin below in place of the ideal
 integrator's $90^\circ$.
 
+> **Note (updated on hardware):** the firmware now ships **`tau_f = 0`** - the
+> `VEL_WIN` sliding-window velocity in `control.c` already de-quantizes the
+> encoder speed, so this measurement pole was redundant. The analysis keeps
+> $\tau_f = 20\ \text{ms}$ on purpose, to *quantify what that filter costs*: the
+> $\approx 25^\circ$ it removes from the phase budget here is exactly the margin
+> (and the step overshoot) that turning it off buys back. See the closing
+> [update from hardware](#update-from-hardware-tau_f-ships-at-0-and-the-closed-loop-id).
+
 So the loop actually analyzed is:
 
 $$
@@ -232,6 +240,39 @@ $$
 
 Halving $\tau_{cl}$ roughly doubles $\omega_c$ and eats into PM - re-run the
 script and watch the margins rather than pushing gains blindly.
+
+## Update from hardware: `tau_f` ships at 0, and the closed-loop id
+
+The margin analysis above deliberately carries the measurement low-pass at
+$\tau_f = 20\ \text{ms}$. On hardware that filter turned out to be the **dominant
+cause of step overshoot** (13-50%), not the feedback gains. The encoder speed is
+already de-quantized by the `VEL_WIN` sliding window in `control.c` (one count is
+$2\pi/1320 \approx 0.0048\ \text{rad}$, so a 10 ms window resolves $\approx
+0.48\ \text{rad/s}$), so the extra $\tau_f$ pole was almost pure phase lag.
+Setting **$\tau_f = 0$** (the shipped default) removes its $\approx 25^\circ$ at
+$\omega_c$, lifting PM from $\approx 60^\circ$ toward $\approx 85^\circ$ and
+eliminating the overshoot - **the $K_p$, $K_i$ never changed**.
+
+A closed-loop identification of the shipped loop (feedforward on, $\tau_f = 0$;
+[../../experiments/closed-loop_identify/](../../experiments/closed-loop_identify/),
+`closed_loop_id.m`) confirms the design:
+
+| Quantity | Identified (L / R) | Design target |
+|----------|--------------------|---------------|
+| Closed-loop $\tau_{cl}$ | 0.0259 / 0.0228 s | $\tau/5 = 0.038$ s |
+| Fit $R^2$ | 0.998 / 0.999 | - |
+| DC gain (tracking) | 1.000 / 1.000 | 1 (zero SS error) |
+| Damping | overdamped, 0% model OS | - |
+
+The measured loop is **~1.5x faster than the $\tau/5$ target** because the
+feedforward speeds setpoint tracking from *outside* the feedback loop, without
+touching its margins - so you get the quicker response at the same robustness.
+Empirical step overshoot is 5-6% on accelerating steps (up to ~19% on hard
+decelerations - the brake/coast nonlinearity, not a feedback issue).
+
+**Lesson:** audit the sensing path's *cumulative* lag (window + any measurement
+LPF + ZOH/compute delay) before retuning feedback gains - a "harmless" extra
+filter can be the entire overshoot.
 
 ## Reproduce / retune in Octave
 

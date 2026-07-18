@@ -164,7 +164,28 @@
       <button class="stopbtn" onclick="send('play stop')">Stop</button>
       <span id="seqstat" class="sys"></span>
     </div>
-    <div class="hint" style="margin-top:6px">steps <code>dur,mL,mR</code> &mdash; dur in seconds, mL/mR in -1..1, max 20 steps.</div>
+    <div class="hint" style="margin-top:6px">steps <code>dur,mL,mR</code> &mdash; dur in seconds, mL/mR in -1..1, up to 1 minute total.</div>
+
+    <div style="margin-top:12px">
+      <div class="plottitle">wheel speed (rad/s) &mdash; last 10 s</div>
+      <canvas id="mplot" class="plot"></canvas>
+      <div class="legend">
+        <label><input type="checkbox" checked onchange="toggleSeries('mplot','vL',this.checked)"><i class="swatch" style="background:#6ea8fe"></i>vel L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('mplot','vR',this.checked)"><i class="swatch" style="background:#f472b6"></i>vel R</label>
+      </div>
+
+      <div class="plottitle">motor output (applied duty)</div>
+      <canvas id="mplot2" class="plot"></canvas>
+      <div class="legend">
+        <label><input type="checkbox" checked onchange="toggleSeries('mplot2','mL',this.checked)"><i class="swatch" style="background:#34d399"></i>motor L</label>
+        <label><input type="checkbox" checked onchange="toggleSeries('mplot2','mR',this.checked)"><i class="swatch" style="background:#fbbf24"></i>motor R</label>
+        <span style="flex:1"></span>
+        <button class="ghost" id="pausebtnM" onclick="togglePause()">Pause</button>
+        <button class="ghost" onclick="resetView()">Reset view</button>
+        <button class="ghost" onclick="clearPlot()">Clear plots</button>
+      </div>
+      <div class="hint" style="margin-top:4px">scroll to zoom time &middot; shift+scroll to zoom magnitude &middot; drag to pan (when paused)</div>
+    </div>
   </div>
 
   <!-- 2. Motors controller panel (TEST_MOTOR_CONTROLLERS) -->
@@ -202,12 +223,39 @@
         <input type="checkbox" id="ff" checked onchange="send('ff ' + (this.checked ? 'on' : 'off'))">
         feedforward
       </label>
+      <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px" title="proportional setpoint weight b: 1 = plain PI (recommended); use slew for overshoot">
+        <span class="k">b</span>
+        <input type="range" id="bweight" min="0" max="1" step="0.05" value="1.00" style="width:90px"
+               oninput="document.getElementById('bwlbl').textContent=(+this.value).toFixed(2)"
+               onchange="send('bweight ' + this.value)" />
+        <span class="v" id="bwlbl" style="width:34px; text-align:right">1.00</span>
+      </label>
+      <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px; cursor:pointer" title="setpoint slew-rate limit [rad/s^2]: ramps the setpoint to kill the step kick. Uncheck to apply the setpoint instantly.">
+        <input type="checkbox" id="slewEn" onchange="applySlew()">
+        slew
+        <input type="number" id="slew" min="0" step="10" value="150" style="width:70px" disabled onchange="applySlew()" />
+        <span class="k">rad/s&sup2;</span>
+      </label>
+      <label style="margin-left:8px; display:inline-flex; align-items:center; gap:6px" title="speed measurement low-pass tau_f [s]: higher smooths the noisy encoder speed but adds lag (more overshoot); 0 = off">
+        <span class="k">&tau;<sub>f</sub></span>
+        <input type="number" id="tauf" min="0" step="0.0005" value="0" style="width:90px" onchange="send('tauf ' + this.value)" />
+        <span class="k">s</span>
+      </label>
     </div>
 
     <div class="row" style="margin-top:10px">
       <span class="k">setpoint L/R:</span> <span class="v" id="spLR">--</span>
       <span class="k">measured L/R:</span> <span class="v" id="meLR">--</span> <span class="k">rad/s</span>
     </div>
+
+    <div class="row" style="margin-top:12px">
+      <span class="k">script:</span>
+      <input type="file" id="sseqfile" accept=".csv,.txt" />
+      <button onclick="uploadSpeedSeq()">Load &amp; play</button>
+      <button class="stopbtn" onclick="send('play stop')">Stop</button>
+      <span id="sseqstat" class="sys"></span>
+    </div>
+    <div class="hint" style="margin-top:6px">steps <code>dur,wL,wR</code> &mdash; dur in seconds, wL/wR in rad/s, up to 1 minute total. Feeds the setpoints through the PI &mdash; a reproducible step input for tuning.</div>
 
     <div id="plotwrap">
       <div class="plottitle">wheel speed (rad/s) &mdash; last 10 s</div>
@@ -375,6 +423,7 @@
     const wsUrl  = () => `ws://${esp}/ws`;
     const otaUrl = () => `http://${esp}/ota`;
     const seqUrl = () => `http://${esp}/motorseq`;
+    const speedSeqUrl = () => `http://${esp}/speedseq`;
 
     function add(text, cls) {
       const now = new Date();
@@ -490,6 +539,9 @@
           syncAlpha(d.text);
           syncGyrocal(d.text);
           syncBGains(d.text);
+          syncBWeight(d.text);
+          syncSlew(d.text);
+          syncTauf(d.text);
         }
       };
     }
@@ -567,6 +619,15 @@
         { key: 'rawL', color: '#34d399', dash: [5, 4] },
         { key: 'rawR', color: '#fbbf24', dash: [5, 4] },
       ] },
+      /* Manual tab (TEST_MOTORS): open-loop wheel speed + applied duty. */
+      mplot: { id: 'mplot', src: 'motors', base: null, yview: null, series: [
+        { key: 'vL', color: '#6ea8fe', dash: [] },
+        { key: 'vR', color: '#f472b6', dash: [] },
+      ] },
+      mplot2: { id: 'mplot2', src: 'motors', base: null, yview: null, series: [
+        { key: 'mL', color: '#34d399', dash: [] },
+        { key: 'mR', color: '#fbbf24', dash: [] },
+      ] },
       plot3: { id: 'plot3', src: 'angles', base: null, yview: null, series: [
         { key: 'pitch', color: '#3b82f6', dash: [] },
       ] },
@@ -587,6 +648,7 @@
       ] },
     };
     const CHART_LIST = [CHARTS.plot, CHARTS.plot2, CHARTS.plot3,
+                        CHARTS.mplot, CHARTS.mplot2,
                         CHARTS.bvel, CHARTS.bout, CHARTS.bpitch];
 
     function pushPlot(t, vL, vR, spL, spR, mL, mR, rawL, rawR) {
@@ -639,7 +701,7 @@
 
     function setPauseLabels() {
       const t = paused ? 'Resume' : 'Pause';
-      for (const id of ['pausebtn', 'pausebtn3', 'pausebtn4']) {
+      for (const id of ['pausebtn', 'pausebtn3', 'pausebtn4', 'pausebtnM']) {
         const b = document.getElementById(id);
         if (b) b.textContent = t;
       }
@@ -662,7 +724,7 @@
       updateCursor();
       scheduleDraw();
     }
-    const PLOT_IDS = ['plot', 'plot2', 'plot3', 'bvel', 'bout', 'bpitch'];
+    const PLOT_IDS = ['plot', 'plot2', 'plot3', 'mplot', 'mplot2', 'bvel', 'bout', 'bpitch'];
     function updateCursor() {
       for (const id of PLOT_IDS) {
         const cv = document.getElementById(id);
@@ -1020,6 +1082,45 @@
       document.getElementById('gkpR').value = m[3];
       document.getElementById('gkiR').value = m[4];
     }
+    /* Sync the b slider from "PI setpoint weight b = 0.30 ..." reply. */
+    function syncBWeight(text) {
+      const m = text.match(/setpoint weight b = ([-\d.]+)/);
+      if (!m) return;
+      const v = parseFloat(m[1]);
+      const el = document.getElementById('bweight');
+      if (el && document.activeElement !== el) el.value = v;
+      const l = document.getElementById('bwlbl');
+      if (l) l.textContent = v.toFixed(2);
+    }
+    /* Slew: checkbox toggles on/off, number sets the rate. Off sends "slew 0". */
+    function applySlew() {
+      const en = document.getElementById('slewEn').checked;
+      const el = document.getElementById('slew');
+      el.disabled = !en;
+      send('slew ' + (en ? el.value : '0'));
+    }
+    /* Sync the slew control from "setpoint slew = 150 rad/s^2 ..." / "= off" reply. */
+    function syncSlew(text) {
+      if (!/setpoint slew = /.test(text)) return;
+      const en = document.getElementById('slewEn');
+      const el = document.getElementById('slew');
+      const m = text.match(/setpoint slew = ([\d.]+) rad/);
+      if (m) {
+        if (en) en.checked = true;
+        if (el && document.activeElement !== el) el.value = parseFloat(m[1]);
+        if (el) el.disabled = false;
+      } else {                                  /* reply said "off" */
+        if (en) en.checked = false;
+        if (el) el.disabled = true;
+      }
+    }
+    /* Sync the tau_f input from "speed meas filter tau_f = 0.020 s ..." reply. */
+    function syncTauf(text) {
+      const m = text.match(/tau_f = ([\d.]+) s/);
+      if (!m) return;
+      const el = document.getElementById('tauf');
+      if (el && document.activeElement !== el) el.value = parseFloat(m[1]);
+    }
 
     /* Balance PID/trim: sync from "balance PID: Kp=.. Ki=.. Kd=.." / theta_ref replies. */
     function applyBGains() {
@@ -1069,6 +1170,7 @@
         if (EXP_FOR_TAB[name]) {
           send(EXP_FOR_TAB[name]);
           if (name === 'angle') { send('est on'); send('alpha'); }   /* enable + fetch current alpha */
+          if (name === 'ctrl')  { send('gains'); send('bweight'); send('slew'); send('tauf'); }   /* fetch PI gains + b + slew + tau_f */
         } else if (name === 'balance') {
           /* Safe idle: est on for display, balance off until operator starts. */
           send('balance off');
@@ -1112,24 +1214,28 @@
     }
 
     /* Motor script: one row per control tick; text/plain avoids CORS preflight. */
-    function uploadSeq() {
-      const f = document.getElementById('seqfile').files[0];
-      const stat = document.getElementById('seqstat');
+    /* POST a step-script file to @p url, showing progress in the #statId span. Shared
+     * by the open-loop duty uploader (/motorseq) and the speed-setpoint one (/speedseq). */
+    function postSeq(url, fileId, statId) {
+      const f = document.getElementById(fileId).files[0];
+      const stat = document.getElementById(statId);
       if (!f) { stat.textContent = 'pick a .csv/.txt file first'; return; }
       stat.textContent = 'uploading...';
       f.text().then((body) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', seqUrl());
+        xhr.open('POST', url);
         xhr.setRequestHeader('Content-Type', 'text/plain');
         xhr.onload = () => {
           stat.textContent = xhr.responseText || xhr.status;
-          add((xhr.status === 200 ? 'motor script: ' : 'motor script failed: ') +
+          add((xhr.status === 200 ? 'script: ' : 'script failed: ') +
               (xhr.responseText || xhr.status), 'resp');
         };
         xhr.onerror = () => { stat.textContent = 'upload error (connection lost)'; };
         xhr.send(body);
       });
     }
+    function uploadSeq()      { postSeq(seqUrl(), 'seqfile', 'seqstat'); }
+    function uploadSpeedSeq() { postSeq(speedSeqUrl(), 'sseqfile', 'sseqstat'); }
 
     /* theme: light default, persisted */
     function applyTheme(t) {

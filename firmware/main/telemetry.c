@@ -143,24 +143,25 @@ const char *telemetry_topic_name(int topic)
 }
 
 int telemetry_topic_pack(uint8_t *buf, size_t len, int topic,
-                         const sample_t *samples, int n)
+                         const sample_t *samples, int count, int stride)
 {
     if (topic < 0 || topic >= NUM_TOPICS) return -1;
+    if (count < 0 || stride < 1) return -1;
 
     uint8_t fields = TOPICS[topic].fields;
-    /* header(4) + n * ( t(u64, 8B) + (fields-1) float32 ) */
+    /* header(4) + count * ( t(u64, 8B) + (fields-1) float32 ) */
     size_t per_sample = 8 + (size_t)(fields - 1) * 4;
-    size_t need = 4 + (size_t)n * per_sample;
+    size_t need = 4 + (size_t)count * per_sample;
     if (need > len) return -1;
 
     buf[0] = (uint8_t)topic;
     buf[1] = fields;
-    buf[2] = (uint8_t)(n & 0xff);
-    buf[3] = (uint8_t)((n >> 8) & 0xff);
+    buf[2] = (uint8_t)(count & 0xff);
+    buf[3] = (uint8_t)((count >> 8) & 0xff);
 
     uint8_t *p = buf + 4;
-    for (int i = 0; i < n; i++) {
-        p += TOPICS[topic].pack(p, &samples[i]);
+    for (int i = 0; i < count; i++) {
+        p += TOPICS[topic].pack(p, &samples[i * stride]);
     }
     return (int)(p - buf);
 }

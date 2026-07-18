@@ -18,11 +18,16 @@
  * (COMP_ALPHA_DEFAULT, VEL_WIN) are preserved in time when this changes. */
 #define CONTROL_HZ     500
 
-/* Telemetry is recorded every REPORT_DIV-th tick, so the streamed sample rate is
- * REPORT_HZ - well below the loop rate. Control still runs at CONTROL_HZ; only what we
- * log/stream is decimated, which cuts WebSocket + reporter CPU load. */
-#define REPORT_DIV     5
+/* Telemetry is recorded every REPORT_DIV-th tick. REPORT_DIV = 1 records at the full
+ * loop rate so the motors topic can stream tick-by-tick (CONTROL_HZ); the reporter then
+ * decimates each topic at stream time (STREAM_DECIM / IMU_STREAM_DIV) to trim bandwidth. */
+#define REPORT_DIV     1
 #define REPORT_HZ      (CONTROL_HZ / REPORT_DIV)
+
+/* Default stream rate for the decimated topics (motors outside TEST_MOTOR_CONTROLLERS,
+ * and angles): keep every STREAM_DECIM-th recorded sample. Must divide SAMPLES_PER_BATCH. */
+#define STREAM_HZ      100
+#define STREAM_DECIM   (CONTROL_HZ / STREAM_HZ)
 
 /* Loop period and batch size. A batch holds SAMPLES_PER_BATCH telemetry samples
  * (0.2 s at REPORT_HZ); BATCH_MS is that span, used for the warning windows. */
@@ -79,9 +84,10 @@ int telemetry_latest_json(char *buf, size_t len, const char *type);
 int         telemetry_topic_count(void);
 const char *telemetry_topic_name(int topic);
 
-/* Pack @p n samples of @p topic into @p buf as a little-endian binary frame:
+/* Pack @p count samples of @p topic into @p buf as a little-endian binary frame:
  *   [u8 topic_id][u8 field_count][u16 sample_count] then per-sample u64 t_us +
- *   (field_count-1) float32. Column order matches telemetry.c and the client.
- * Returns the byte length, or negative if it would not fit. */
+ *   (field_count-1) float32. Samples are taken with @p stride (samples[i*stride],
+ *   i in [0,count)) so a topic can be decimated. Column order matches telemetry.c and
+ *   the client. Returns the byte length, or negative if it would not fit. */
 int telemetry_topic_pack(uint8_t *buf, size_t len, int topic,
-                         const sample_t *samples, int n);
+                         const sample_t *samples, int count, int stride);

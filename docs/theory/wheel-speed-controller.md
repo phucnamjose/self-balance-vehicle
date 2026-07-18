@@ -118,6 +118,32 @@ light first-order low-pass on `w_meas` (or a short moving average) may be needed
 This is noted here as a design consideration; the exact filter is decided during
 bring-up against real encoder data.
 
+### As built: two smoothing stages, and why `tau_f` ships at 0
+
+Bring-up ended with **two** low-pass stages in series on the speed feedback, and
+the interaction between them was the dominant source of step **overshoot** -
+worth recording as a lesson:
+
+1. **Sliding-window velocity** (`VEL_WIN = 5` in `control.c`): speed is a finite
+   difference of encoder counts over the last ~10 ms. This *is* the velocity
+   estimator, and it sets the **quantization floor**. At 1320 counts/rev one
+   count is `2π/1320 ≈ 0.0048 rad`, so a single 2 ms tick would quantize speed to
+   `~2.4 rad/s`, while the 10 ms window brings that to `~0.48 rad/s`. The window
+   is mandatory; its width is a resolution choice, and it costs ~4-5 ms of delay.
+2. **Measurement LPF `tau_f`** (`wheel_pi.c`): a first-order filter on that
+   *already-windowed* speed, feeding the PI. This is extra smoothing on a signal
+   the window has largely cleaned up.
+
+Running both stacks their lag (`~4-5 ms + 20 ms ≈ 25 ms`), which erodes phase
+margin and showed up as **13-50% overshoot** on speed steps. Because the window
+already handles quantization, the fix was simply **`tau_f = 0`** (filter off):
+the overshoot vanished with no downside beyond a slightly noisier duty. Rule of
+thumb: keep *one* primary smoother (the window) and treat `tau_f` as a small
+live-tunable trim (`~0.003-0.005 s`) only if the duty chatters - don't tune two
+overlapping low-passes against the same noise. The empirical closed-loop check is
+in [../../experiments/closed-loop_identify/](../../experiments/closed-loop_identify/)
+(`tau_cl ≈ 0.023-0.026 s`, overdamped, unity DC gain).
+
 ## Sign conventions
 
 - `+w_set` = forward; `+duty` = forward.
@@ -161,9 +187,11 @@ per-wheel spread is the measured motor mismatch this loop exists to absorb. The
 feedforward `K` is each motor's identified steady-state gain
 ([motor-identification.md](motor-identification.md)).
 
-Other compiled defaults (`wheel_pi.c`): measurement LPF `tau_f = 0.02 s`, output
-cap `±0.95`, integral clamp `±0.95`, brake cap `0.4`, deadband compensation
-**off** by default (neutral `0.02`, floor `0.10` when on), feedforward **on**.
+Other compiled defaults (`wheel_pi.c`): measurement LPF `tau_f = 0` (**off** -
+see [below](#as-built-two-smoothing-stages-and-why-tau_f-ships-at-0);
+live-tunable with `tauf <s>`), output cap `±0.95`, integral clamp `±0.95`, brake
+cap `0.4`, deadband compensation **off** by default (neutral `0.02`, floor `0.10`
+when on), feedforward **on**.
 
 Seed constants (for reference): `w_noload = 34.9 rad/s` (from the sim),
 `deadband = 0.10` (measured on hardware, Phase 4 deadband sweep).

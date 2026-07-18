@@ -25,9 +25,9 @@ static const char *TAG = "control";
 #define ALARM_COUNT    (TIMER_RES_HZ / CONTROL_HZ)       /* 500 Hz motor tick */
 
 /* Wheel speed = finite difference of encoder counts over a sliding VEL_WIN-tick
- * window; averaging cuts count-quantization noise (~14 ms window at 500 Hz).
+ * window; averaging cuts count-quantization noise (~10 ms window at 500 Hz).
  * A longer window trades resolution for delay - wrong on a latency-limited loop. */
-#define VEL_WIN        8
+#define VEL_WIN        5
 
 /* Gyro is reported in deg/s; the balance loop wants the tilt rate in rad/s. */
 #define DEG2RAD        (float)(M_PI / 180.0)
@@ -53,8 +53,8 @@ static const char *TAG = "control";
 #define REPORT_FRAME_MAX_FIELDS 9
 #define REPORT_FRAME_CAP  (4 + SAMPLES_PER_BATCH * (8 + (REPORT_FRAME_MAX_FIELDS - 1) * 4) + 64)
 
-/* Stream the bulky imu topic once per second (every IMU_STREAM_DIV-th batch = batches
- * per second) while motors/angles stream every batch. */
+/* Stream one newest imu sample per second: batches arrive at REPORT_HZ/SAMPLES_PER_BATCH
+ * Hz, so every IMU_STREAM_DIV-th batch is one per second. */
 #define IMU_STREAM_DIV  (REPORT_HZ / SAMPLES_PER_BATCH)
 
 /* Two RT tasks on core 1: motor_task (500 Hz, hard-RT, no I2C) and imu_task (250 Hz,
@@ -163,16 +163,19 @@ static volatile bool     s_est_enabled;  /* run the orientation (roll/pitch) est
 static volatile bool     s_ctrl_enabled; /* run the wheel/motor controller */
 static volatile bool     s_bal_enabled;  /* run the balance (tilt) outer loop */
 
-/* Scripted open-loop playback (TEST_MOTORS): hold (mL,mR) per step for a duration.
- * Durations are stored as cumulative end times. Static buffer so the loop never
- * touches freed memory; the uploader publishes s_play_len last. */
-typedef struct { float t_end, mL, mR; } play_pt_t;   /* t_end: step end, s from start */
-#define PLAYBACK_MAX 20
+/* Scripted playback: hold (vL,vR) per step for a duration - duty (TEST_MOTORS) or
+ * wheel-speed setpoints (TEST_MOTOR_CONTROLLERS) per s_play_kind. Durations are stored
+ * as cumulative end times. Static buffer so the loop never touches freed memory; the
+ * uploader publishes s_play_len last. */
+typedef struct { float t_end, vL, vR; } play_pt_t;   /* t_end: step end, s from start */
+#define PLAYBACK_MAX   128       /* step-array capacity (fixed for RT safety) */
+#define PLAYBACK_MAX_S 60.0f     /* total script duration cap [s] */
 static play_pt_t         s_play[PLAYBACK_MAX];
 static volatile int      s_play_len;     /* number of loaded steps */
 static volatile int      s_play_idx;     /* index of the active step */
 static volatile bool     s_play_active;  /* playback running */
 static volatile bool     s_play_report;  /* playback finished on its own: reporter announces */
+static volatile playback_kind_t s_play_kind = PLAY_DUTY;  /* duty vs speed-setpoint steps */
 static int64_t           s_play_t0_us;   /* esp_timer time when playback started */
 
 /* Deadband sweep (TEST_MOTORS): ramp both motors 0..DB_MAX forward then reverse and
@@ -336,6 +339,26 @@ static void deadband_step(int64_t now_us, float *cmdL, float *cmdR)
     *cmdR = cmd[1];
 }
 
+/* Advance the time-based playback script to the step active at now_us. On completion
+ * clear s_play_active, flag the reporter and return false with the outputs zeroed. The
+ * (vL,vR) values are duty or rad/s per s_play_kind - the caller applies them. */
+static bool playback_step(int64_t now_us, float *vL, float *vR)
+{
+    float elapsed = (float)(now_us - s_play_t0_us) * 1e-6f;
+    int i = s_play_idx;
+    while (i < s_play_len && elapsed >= s_play[i].t_end) i++;
+    s_play_idx = i;
+    if (i >= s_play_len) {
+        s_play_active = false;
+        s_play_report = true;
+        *vL = 0.0f; *vR = 0.0f;
+        return false;
+    }
+    *vL = s_play[i].vL;
+    *vR = s_play[i].vR;
+    return true;
+}
+
 static void imu_task(void *arg);   /* spawned by motor_task once peripherals are up */
 
 /* Hard-real-time 500 Hz task (core 1, highest control priority). Owns the encoders,
@@ -435,8 +458,9 @@ static void motor_task(void *arg)
             velR = encoder_cps_to_radps((int32_t)((vel_hist[1][vel_new] - vel_hist[1][vel_old]) * scale));
         }
 
-        /* Motor commands. Closed loop: from the wheel controller. Open loop: a loaded
-         * playback script takes priority, else the effort from the web terminal.
+        /* Motor commands. Closed loop: the wheel PI, with its setpoint from a speed
+         * playback script / balance / the 'speed' command. Open loop: the deadband sweep
+         * or a duty playback script take priority, else the effort from the web terminal.
          * ('stop' only zeroes the open-loop command; STOP_CONTROL deletes the task.) */
         float cmdL, cmdR;
         float wsetL = NAN, wsetR = NAN;   /* setpoints for telemetry (NaN when open loop) */
@@ -446,11 +470,19 @@ static void motor_task(void *arg)
             if (!ctrl_was) wheel_pi_reset();
             float dt = (dt_us > 0) ? (float)dt_us * 1e-6f : (1.0f / (float)CONTROL_HZ);
 
-            /* Balance runs in imu_task; here we just consume its published common
-             * setpoint + fall-cut flag (ZOH) every tick. On a cut, zero the wheels and
-             * reset the PI once so it doesn't wind up while parked. */
+            /* Setpoint source, in priority order:
+             *  1. a running speed playback script (reproducible step input for the PI),
+             *  2. the balance loop's published common setpoint (ZOH from imu_task),
+             *  3. otherwise the last 'speed' command persists.
+             * On a balance cut, zero the wheels and reset the PI once so it doesn't wind
+             * up while parked. */
             bool balance_cut = false;
-            if (s_bal_enabled) {
+            if (s_play_active && s_play_kind == PLAY_SPEED && !s_bal_enabled) {
+                float vL, vR;
+                playback_step(now_us, &vL, &vR);   /* sets 0 on completion */
+                wheel_pi_set_setpoint(0, vL);
+                wheel_pi_set_setpoint(1, vR);
+            } else if (s_bal_enabled) {
                 if (s_bal_cut) {
                     balance_cut = true;
                 } else {
@@ -479,23 +511,16 @@ static void motor_task(void *arg)
         } else if (s_db_active) {
             /* Deadband sweep takes priority over playback/manual while running. */
             deadband_step(now_us, &cmdL, &cmdR);
-        } else if (s_play_active) {
-            /* Time-based playback: skip finished steps, apply the current one, park at the end. */
-            float elapsed = (float)(now_us - s_play_t0_us) * 1e-6f;
-            int i = s_play_idx;
-            while (i < s_play_len && elapsed >= s_play[i].t_end) i++;
-            s_play_idx = i;
-            if (i >= s_play_len) {
-                s_play_active = false;      /* end of script: park + open loop */
-                s_play_report = true;       /* reporter announces completion (core 0) */
+        } else if (s_play_active && s_play_kind == PLAY_DUTY) {
+            /* Open-loop duty playback: apply the current step; on completion also park
+             * the manual command so the wheels don't jump to a stale 'motor' value. */
+            float vL, vR;
+            if (!playback_step(now_us, &vL, &vR)) {
                 motor_cmd_set(0, 0.0f);
                 motor_cmd_set(1, 0.0f);
-                cmdL = 0.0f;
-                cmdR = 0.0f;
-            } else {
-                cmdL = s_play[i].mL;
-                cmdR = s_play[i].mR;
             }
+            cmdL = vL;
+            cmdR = vR;
         } else {
             cmdL = motor_cmd_get(0);
             cmdR = motor_cmd_get(1);
@@ -504,9 +529,10 @@ static void motor_task(void *arg)
         motor_set(1, cmdR);
         ctrl_was = s_ctrl_enabled;
 
-        /* Record telemetry every REPORT_DIV-th tick (REPORT_HZ) to cut streamed data;
-         * control still runs full rate. The IMU sample + estimate come from imu_task
-         * via the seqlock; a torn read keeps the previous snapshot. */
+        /* Record one telemetry sample every REPORT_DIV-th tick. REPORT_DIV = 1 records at
+         * the full loop rate so the motors topic can stream at CONTROL_HZ; the reporter
+         * decimates the other topics per mode. The IMU sample + estimate come from
+         * imu_task via the seqlock; a torn read keeps the previous snapshot. */
         if (++rpt_count >= REPORT_DIV) {
             rpt_count = 0;
             imu_pub_try_read(&pub_imu, &pub_roll, &pub_pitch);
@@ -821,8 +847,9 @@ static void emit_playback_result(void)
 
     float total = (s_play_len > 0) ? s_play[s_play_len - 1].t_end : 0.0f;
     char msg[96];
-    snprintf(msg, sizeof(msg), "playback finished (%d steps, %.2f s), motors parked",
-             s_play_len, (double)total);
+    snprintf(msg, sizeof(msg), "playback finished (%d steps, %.2f s), %s",
+             s_play_len, (double)total,
+             s_play_kind == PLAY_SPEED ? "setpoints zeroed" : "motors parked");
     ESP_LOGI(TAG, "%s", msg);
     char json[160];
     snprintf(json, sizeof(json), "{\"type\":\"resp\",\"text\":\"%s\"}", msg);
@@ -885,25 +912,39 @@ static void reporter_task(void *arg)
         /* Announce the gyro-bias calibration result when the loop finishes one. */
         emit_gyrocal_result();
 
-        /* Pack one binary frame per topic and stream it to WebSocket clients. The
+        /* Pack one binary frame per topic and stream it, decimating per topic (recording
+         * is full-rate). motors streams tick-by-tick (CONTROL_HZ) in TEST_MOTOR_CONTROLLERS
+         * so a wheel step is captured exactly, else at STREAM_HZ; angles is dropped in that
+         * mode (not needed while tuning wheels); imu is one newest sample per second. The
          * scratch buffer is static (too big for the task stack, and avoids the heap
          * fragmentation a per-batch malloc caused). Only reporter_task touches it. */
         if (web_server_streaming()) {
             static uint8_t frame[REPORT_FRAME_CAP];
             static uint32_t batch_no = 0;
+            bool motor_ctrl = s_ctrl_enabled && !s_est_enabled && !s_bal_enabled;
             for (int t = 0; t < telemetry_topic_count(); t++) {
-                /* Throttle the bulky imu topic to ~1 Hz; stream the rest every batch. */
-                if (strcmp(telemetry_topic_name(t), "imu") == 0 &&
-                    (batch_no % IMU_STREAM_DIV) != 0) {
-                    continue;
+                const char     *name = telemetry_topic_name(t);
+                const sample_t *src  = batch;
+                int count, stride;
+                if (strcmp(name, "motors") == 0) {
+                    stride = motor_ctrl ? 1 : STREAM_DECIM;   /* CONTROL_HZ vs STREAM_HZ */
+                    count  = SAMPLES_PER_BATCH / stride;
+                } else if (strcmp(name, "angles") == 0) {
+                    if (motor_ctrl) continue;                 /* not needed while tuning wheels */
+                    stride = STREAM_DECIM;
+                    count  = SAMPLES_PER_BATCH / stride;
+                } else {   /* imu: one newest sample per second */
+                    if ((batch_no % IMU_STREAM_DIV) != 0) continue;
+                    src    = &batch[SAMPLES_PER_BATCH - 1];
+                    stride = 1;
+                    count  = 1;
                 }
-                int n = telemetry_topic_pack(frame, sizeof(frame), t, batch,
-                                             SAMPLES_PER_BATCH);
+                int n = telemetry_topic_pack(frame, sizeof(frame), t, src, count, stride);
                 if (n > 0) {
                     ws_broadcast_bin(frame, (size_t)n);
                 } else {
                     ESP_LOGW(TAG, "topic '%s' frame did not fit in %u bytes",
-                             telemetry_topic_name(t), (unsigned)sizeof(frame));
+                             name, (unsigned)sizeof(frame));
                 }
             }
             batch_no++;
@@ -979,24 +1020,28 @@ void control_set_controller(bool on)  { s_ctrl_enabled = on; }
 bool control_balance_enabled(void)    { return s_bal_enabled; }
 void control_set_balance(bool on)     { s_bal_enabled = on; }
 
-void control_playback_begin(void)
+void control_playback_begin(playback_kind_t kind)
 {
     s_play_active = false;   /* stop the loop touching it before we refill */
     s_play_idx = 0;
     s_play_len = 0;
+    s_play_kind = kind;
 }
 
-int control_playback_append(float dur, float mL, float mR)
+int control_playback_append(float dur, float vL, float vR)
 {
     if (s_play_len >= PLAYBACK_MAX) return -1;
     if (dur <= 0.0f) return -2;             /* a step must last a positive time */
-    if (mL >  1.0f) mL =  1.0f; else if (mL < -1.0f) mL = -1.0f;
-    if (mR >  1.0f) mR =  1.0f; else if (mR < -1.0f) mR = -1.0f;
     int i = s_play_len;
     float prev_end = (i > 0) ? s_play[i - 1].t_end : 0.0f;
+    if (prev_end + dur > PLAYBACK_MAX_S) return -3;   /* would exceed the total-time cap */
+    /* Clamp to the kind's range: duty to the drive limit, speed to the setpoint cap. */
+    float lim = (s_play_kind == PLAY_SPEED) ? WHEEL_PI_WSET_MAX : 1.0f;
+    if (vL >  lim) vL =  lim; else if (vL < -lim) vL = -lim;
+    if (vR >  lim) vR =  lim; else if (vR < -lim) vR = -lim;
     s_play[i].t_end = prev_end + dur;       /* durations -> cumulative end time */
-    s_play[i].mL    = mL;
-    s_play[i].mR    = mR;
+    s_play[i].vL    = vL;
+    s_play[i].vR    = vR;
     s_play_len = i + 1;      /* publish last so the loop only sees full entries */
     return s_play_len;
 }
@@ -1016,6 +1061,8 @@ void control_playback_stop(void)
     s_play_active = false;
     motor_cmd_set(0, 0.0f);
     motor_cmd_set(1, 0.0f);
+    wheel_pi_set_setpoint(0, 0.0f);   /* also drop a speed-script setpoint */
+    wheel_pi_set_setpoint(1, 0.0f);
 }
 
 bool control_playback_active(void) { return s_play_active; }
