@@ -4,10 +4,15 @@
 
 /* Default PID gains (seeds - tune on hardware). The outer loop outputs a wheel-speed
  * command, so gains are in rad/s-of-speed per rad tilt (Kp), per rad*s (Ki), per
- * rad/s (Kd). Bring-up: raise Kp until it buzzes, add Kd to damp, then a little Ki. */
-#define BALANCE_KP_DEFAULT   60.00f
-#define BALANCE_KI_DEFAULT   500.00f
-#define BALANCE_KD_DEFAULT   8.00f
+ * rad/s (Kd). In this velocity cascade Ki is the restoring stiffness (must clear
+ * g/r ~= 302 to beat gravity; 450 gives ~50% margin), Kp is damping, and Kd behaves
+ * like added base inertia - so keep it SMALL. Seeds are the flat optimum from
+ * simulation/tune_cascade.m (multi-rate 500/250/250, inner tau_f=0). Bring-up: with
+ * the fast tau_f=0 inner loop, hot gains (esp. Kd) chatter the duty and the cart
+ * accel then corrupts the tilt estimate - raise gently. */
+#define BALANCE_KP_DEFAULT   45.00f
+#define BALANCE_KI_DEFAULT   450.00f
+#define BALANCE_KD_DEFAULT   3.00f
 
 /* Integral-state clamp [rad/s], at the output ceiling: a persistent lean can call
  * on full drive authority but no more. */

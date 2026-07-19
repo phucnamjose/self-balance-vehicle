@@ -1,11 +1,12 @@
 # Loop Rates and Sampling Frequencies
 
 Every part of the robot runs on its own clock: the motor PWM switches at 10 kHz,
-the control loop ticks at 200 Hz, the outer loops at 50 Hz, telemetry leaves at
-2 Hz. This note explains, at university level, **why each of those numbers is what
-it is** - from the physics that sets the fastest thing we must react to, up through
-the sampling and anti-aliasing rules, to the actuator carrier. It is the timing
-counterpart to the cascade in [README.md](README.md) and the loop-shaping in
+the motor + wheel-speed loop ticks at 500 Hz, the IMU read + tilt estimator + balance
+loop at 250 Hz, telemetry leaves at ~2 Hz. This note explains,
+at university level, **why each of those numbers is what it is** - from the physics
+that sets the fastest thing we must react to, up through the sampling and
+anti-aliasing rules, to the actuator carrier. It is the timing counterpart to the
+cascade in [README.md](README.md) and the loop-shaping in
 [pi-tuning.md](pi-tuning.md).
 
 > Math renders in GitHub and Cursor's Markdown preview (KaTeX). Figures are
@@ -15,17 +16,21 @@ counterpart to the cascade in [README.md](README.md) and the loop-shaping in
 
 ## Three rules the whole design follows
 
-1. **One master clock, integer sub-rates.** A single hardware timer ticks at
-   `CONTROL_HZ` = 200 Hz
-   ([../../firmware/main/telemetry.h](../../firmware/main/telemetry.h)); every
-   slower activity (outer loops, telemetry) runs on an **integer division** of it.
-   No second free-running loop, so there are no beat frequencies between
-   asynchronous loops and every rate is a clean fraction of 200 Hz.
+1. **Integer-ratio clocks.** The motor + wheel-speed loop runs at `CONTROL_HZ` =
+   500 Hz ([../../firmware/main/telemetry.h](../../firmware/main/telemetry.h)); the
+   IMU read + estimator + balance PID run at 250 Hz (= 500/2) as an exact **integer
+   sub-rate** (`BALANCE_DIV = 1`, so the balancer steps every IMU tick), with telemetry
+   decimated from the same tick. Because every rate is a clean fraction of 500 Hz there are no beat
+   frequencies between the loops. There *are* two hardware timers, not one: the
+   blocking I2C IMU read lives in its own 250 Hz task so it can never stall the
+   500 Hz motor tick ([../../firmware/main/control.c](../../firmware/main/control.c)) -
+   but the two timers are locked to a 2:1 ratio, so this is still one clock family,
+   not two free-running loops that could beat.
 2. **Separation of timescales.** In a cascade each inner loop must look
    ~*instantaneous* to the loop wrapped around it, and each outer loop must look
    ~*quasi-static* (slowly varying) to the loop inside it. Rule of thumb: a factor
    of ~$3$-$5$ between successive loop **bandwidths** (crossover frequencies). Note
-   this is about *bandwidth*, not sample rate - two loops can share the 200 Hz tick
+   this is about *bandwidth*, not sample rate - two loops can share a tick rate
    as long as their crossovers are separated.
 3. **Sample fast, filter early.** Close a loop at $\omega_s \gtrsim 20\,\omega_c$
    (sample rate at least ~20x its crossover) so the sample-and-hold delay barely
@@ -53,9 +58,9 @@ Read it in four rows, slowest at the top:
 
 Two gaps matter. The **green shaded band** (left, up to ~50 rad/s) is where all the
 control action happens; everything to the right is "housekeeping" frequencies that
-must stay clear of it. And the arrow marks the **~24x gap** between the fastest loop
-(wheel, 25.8 rad/s) and the Nyquist frequency (628 rad/s) - that headroom is rule 3
-in action.
+must stay clear of it. And the arrow marks the **~52x gap** between the balance loop
+(30 rad/s) and its 250 Hz sample rate (1571 rad/s) - the tightest oversampling
+ratio in the stack, and rule 3 in action for the loop that matters most.
 
 ## The plant timescales we must respect
 
@@ -82,8 +87,13 @@ would tip more slowly.)
 **The wheels are sluggish by comparison.** Each motor is first order with
 $\tau \approx 0.19$ s ([motor-identification.md](motor-identification.md)), a pole
 at $1/\tau \approx 5.3$ rad/s (0.84 Hz). The inner wheel-speed loop is tuned to a
-crossover $\omega_c = 25.8$ rad/s (4.1 Hz) with $67^\circ$ phase margin
-([pi-tuning.md](pi-tuning.md)).
+feedback crossover $\omega_c \approx 25.8$ rad/s ([pi-tuning.md](pi-tuning.md)), but
+the loop that the balancer actually rides on is the **closed-loop setpoint
+tracking**, which is faster: with the measurement low-pass off (`tau_f = 0`) and
+feedforward on, a closed-loop identification measures $\tau_{cl} \approx 0.025$ s -
+an effective tracking bandwidth of $\approx 40$ rad/s (6.4 Hz)
+([../../experiments/closed-loop_identify/](../../experiments/closed-loop_identify/)).
+That is what puts the inner loop safely *above* the balance loop (below).
 
 The exact values (the numeric version of the map above):
 
@@ -91,104 +101,109 @@ The exact values (the numeric version of the map above):
 |-------------------|------|------------|
 | ~1-3 | ~0.2-0.5 | outer velocity / position loop crossover (target) |
 | 5.3 | 0.84 | open-loop wheel pole $1/\tau$ |
-| 25.8 | 4.1 | inner wheel-speed loop crossover (tuned) |
 | **20.57** | **3.27** | **unstable body pole** (time-to-double 34 ms) |
-| ~30-40 | ~5-6.5 | balance loop crossover (must sit **above** the unstable pole) |
+| ~30 | ~4.8 | balance loop crossover (must sit **above** the unstable pole) |
+| ~40 | ~6.4 | inner wheel-speed closed-loop tracking ($\tau_{cl}\approx25$ ms, `tau_f=0` + FF) |
 | 276 | 44 | IMU DLPF cutoff (sensor bandwidth) |
-| 628 | 100 | control-loop **Nyquist** ($\omega_s/2$ at 200 Hz) |
-| 1257 | 200 | control sample rate $\omega_s$ |
+| 1571 | 250 | IMU / estimator / **balance** sample rate (= motor **Nyquist**) |
+| 3142 | 500 | motor sample rate $\omega_s$ |
 | ~6.3e4 | 1e4 | motor PWM carrier |
 
-## The control tick: why 200 Hz
+## The control tick: why 500 / 250 Hz
 
-`CONTROL_HZ = 200` is the master rate; the whole real-time path (read IMU ->
-estimate tilt -> run the loops -> write PWM) executes once per 5 ms tick
-([../../firmware/main/control.c](../../firmware/main/control.c)).
+`CONTROL_HZ = 500` is the master rate. The real-time path is **split across two
+core-1 tasks**, each woken by its own timer
+([../../firmware/main/control.c](../../firmware/main/control.c)):
 
-**It is fast enough for the unstable pole.** Over one tick the tilt grows by
-$e^{20.57\cdot 0.005} = e^{0.103} \approx 1.11$ - about 11% per tick, so the loop
-gets ~7 correction opportunities per doubling time. `sim_discrete.m` balances the
-robot at exactly this rate with an honest sensor + motor model, which is the
-practical proof. (With the short body the margin is tighter than a taller robot's;
-if bring-up struggles, 400 Hz is the first lever - see below.)
+- **`motor_task` @ 500 Hz** (2 ms): read encoders -> wheel-speed PI -> write PWM ->
+  record telemetry. It never touches I2C, so nothing can stall it.
+- **`imu_task` @ 250 Hz** (4 ms): the *blocking* MPU6050 read -> complementary
+  filter -> **balance PID** (also 250 Hz, `BALANCE_DIV = 1`). It publishes the
+  common wheel-speed command that `motor_task` tracks. The sub-rate machinery is
+  kept (drop `BALANCE_HZ` to run the PID slower) but ships at 1:1 with the read.
 
-**The sampling delay is affordable.** Sampling is not free: holding the output flat
-between ticks (zero-order hold) plus one tick of compute latency acts like a pure
-**transport delay** of about $T_d \approx 1.5\,\Delta t = 7.5$ ms at 200 Hz, whose
-phase lag $-\omega\,T_d$ grows linearly with frequency. That lag is exactly what
-eats phase margin, so the sample rate is really a *phase-budget* decision:
+The split exists because the I2C read can block for milliseconds; on one tick it
+would blow a 500 Hz budget. Isolating it in a lower-priority 250 Hz task keeps the
+fast loop hard-real-time (the reasoning and bring-up scars are in the roadmap).
 
-![Sample-and-hold phase penalty vs frequency, for 100/200/400 Hz](loop-rates-delay.png)
+**It is fast enough for the unstable pole.** The binding rate is the *balance* loop
+at 250 Hz: over one 4 ms balance tick the tilt grows by
+$e^{20.57\cdot 0.004} = e^{0.082} \approx 1.09$ - about 9% per step, so the balancer
+gets ~8 correction opportunities per 34 ms doubling. The motor loop, at 2 ms,
+grows only $e^{20.57\cdot 0.002}\approx 1.04$ (4%/tick). The cascade sim
+([../../simulation/sim_cascade.m](../../simulation/sim_cascade.m)) balances the
+robot end-to-end at exactly these rates with an honest sensor + motor model.
 
-At the crossover the loops actually run (~25 rad/s) the penalty is small at 200 Hz
-($-11^\circ$) but doubles at 100 Hz ($-22^\circ$) and halves at 400 Hz ($-6^\circ$):
+**The sampling delay is affordable - and it is the balance loop's, not the motor
+loop's, that matters.** Holding the output flat between ticks (zero-order hold) plus
+compute latency acts like a pure **transport delay** $T_d \approx 1.5\,\Delta t$,
+whose phase lag $-\omega\,T_d$ grows linearly with frequency. Each loop pays its own:
 
-| Rate | $T_d$ | phase lag at 25.8 rad/s |
-|------|-------|--------------------------|
-| 100 Hz | 15 ms | $-22^\circ$ |
-| **200 Hz** | **7.5 ms** | **$-11^\circ$** |
-| 400 Hz | 3.75 ms | $-6^\circ$ |
+![Sample-and-hold phase penalty vs frequency, for 125/250/500 Hz](loop-rates-delay.png)
 
-The $-11^\circ$ at 200 Hz is small change against a ~$45$-$70^\circ$ phase-margin
-budget - the same $-11^\circ$ term appears in the [pi-tuning.md](pi-tuning.md)
-Nyquist analysis, which still lands $67^\circ$.
+At the balance crossover (~30 rad/s) the penalty is $-5^\circ$ for anything on the
+500 Hz tick and $-10^\circ$ at the 250 Hz the balance loop and IMU read run at
+(a sub-rated 125 Hz would have cost $-21^\circ$):
 
-**Why not slower, why not faster.** The plot shows the sweet spot:
+| Rate | $T_d$ | phase lag at 30 rad/s | who runs here |
+|------|-------|-----------------------|---------------|
+| 500 Hz | 3 ms | $-5^\circ$ | motor + wheel PI |
+| **250 Hz** | **6 ms** | **$-10^\circ$** | **IMU read + estimator + balance PID** |
+| 125 Hz | 12 ms | $-21^\circ$ | (balance if sub-rated, `BALANCE_DIV = 2`) |
 
-- **Slower (100 Hz)** costs $-22^\circ$ at the crossover, and with the unstable pole
-  so close to that crossover the balance margin gets thin. 100 Hz is the floor.
-- **Faster (400 Hz)** buys back ~$+5^\circ$, *but* it worsens **encoder velocity
-  quantization**: one count in a tick is $\tfrac{2\pi}{1320}/\Delta t$ rad/s, which
-  is $0.95$ rad/s at 200 Hz and doubles to ~1.9 rad/s at 400 Hz. Coarser speed
-  needs heavier filtering, and the filter's own phase lag gives back much of what
-  the shorter delay won.
+The $-10^\circ$ at 250 Hz is cheap against a phase-margin budget the cascade sim
+shows is comfortable at the recommended gains
+([balance-controller.md](balance-controller.md)). The balancer runs at the full
+`imu_task` rate (`BALANCE_DIV = 1`); if CPU ever gets tight it can be sub-rated back
+to 125 Hz (`BALANCE_DIV = 2`) for $-21^\circ$, still inside the margin.
 
-So **200 Hz is the baseline** (delay small, quantization tolerable, sim-validated).
-If bring-up shows the cascade is too tight (next section), **400 Hz is the first
-knob to turn** - a one-line change, and the rest of the ladder scales with it.
+**Why the motor loop is fast (500 Hz).** The wheel PI wants a short tick for two
+reasons: it keeps the inner loop's own ZOH lag negligible ($-5^\circ$), so the loop
+that the balancer rides on stays fast and phase-clean; and it lets the `VEL_WIN`
+sliding-window velocity de-quantize the encoder without heavy filtering - one count
+per 2 ms tick is $\tfrac{2\pi}{1320}/0.002 \approx 2.4$ rad/s, which the 5-sample
+(10 ms) window smooths to $\approx 0.48$ rad/s. That window, *not* a measurement
+low-pass, is why `tau_f` now ships at 0 ([pi-tuning.md](pi-tuning.md)).
 
-## Cascade rates and the tight-separation caveat
+## Cascade rates and separation of timescales
 
-The intended stack, inner to outer ([README.md](README.md)):
+The stack, inner to outer ([README.md](README.md)):
 
-| Loop | Runs at | Divisor of tick | Crossover target | Separation check |
-|------|---------|-----------------|------------------|------------------|
-| `wheel_speed_ctrl` (inner) | 200 Hz | ÷1 | 25.8 rad/s (retune to ~49) | should be fastest closed loop |
-| `balance_ctrl` | 200 Hz | ÷1 | ~30-40 rad/s | **> unstable pole 20.6** |
-| `yaw_ctrl` | 50 Hz | ÷4 | ~2-5 rad/s | decoupled (differential) |
-| `velocity_ctrl` | 50 Hz | ÷4 | ~1-3 rad/s | below balance |
+| Loop | Runs at | Rate source | Bandwidth | Separation check |
+|------|---------|-------------|-----------|------------------|
+| `wheel_speed_ctrl` (inner) | 500 Hz | `motor_task` | ~40 rad/s (tracking) | fastest closed loop ✓ |
+| `balance_ctrl` | 250 Hz | `imu_task` (`BALANCE_DIV=1`) | ~30 rad/s | **> unstable pole 20.6** ✓, < inner ✓ |
+| `yaw_ctrl` | (TBD) | sub-rate | ~2-5 rad/s | decoupled (differential) |
+| `velocity_ctrl` | (TBD) | sub-rate | ~1-3 rad/s | below balance |
 
-Plotting each loop's closed-loop bandwidth (rule 2) shows the design tension at a
-glance:
+Plotting each loop's closed-loop bandwidth (rule 2):
 
-![Nested closed-loop bandwidths showing the balance/wheel overlap](loop-rates-cascade.png)
+![Nested closed-loop bandwidths: velocity, balance, wheel-speed](loop-rates-cascade.png)
 
-The velocity loop (green) sits a full decade below the others - a clean, textbook
-separation. But **balance (blue) and wheel-speed (black) now clash**: the balance
-loop must cross over *above* the unstable pole (red dotted, 20.6 rad/s) to
-stabilize it, which pushes it to ~30-40 rad/s - **above** the untuned inner wheel
-loop (25.8 rad/s). That inverts the cascade requirement (the inner loop must be
-the *faster* one), so with this short body retuning the inner loop is no longer
-optional. This is inherent to a small, twitchy balancer (short body -> fast
-unstable pole), and it drives two choices:
+The three loops now nest cleanly, **innermost fastest**: wheel-speed (black,
+~40 rad/s) > balance (blue, ~30 rad/s) > velocity (green, ~2 rad/s), with the
+unstable pole (red dotted, 20.6 rad/s) tucked *just below* the balance crossover so
+the balancer can stabilize it.
 
-1. **Push the inner loop tighter (now mandatory).** Retune the wheel-speed loop to
-   $\tau_{cl}=\tau/10$, moving its crossover to $\omega_c \approx 49$ rad/s (orange
-   dashed in the plot; the ideal $1/\tau_{cl}=53$, pulled down by the delay +
-   measurement filter). Phase margin drops to ~$48^\circ$ at 200 Hz (still healthy);
-   this puts the inner loop back above a ~32 rad/s balance loop (~1.5x separation).
-   The margin is thin, so **400 Hz** is attractive here: the same crossover keeps
-   ~$58^\circ$ and buys back separation headroom - the concrete payoff of the
-   higher rate for this build.
-2. **Sub-rate only the genuinely slow loops.** Velocity and yaw crossovers are
-   ~1-5 rad/s, so 50 Hz (÷4) is >60x their bandwidth - plenty by rule 3 - while the
-   ÷4 keeps them comfortably below the balance loop (rule 2) and saves CPU. Balance
-   stays on the full 200 Hz tick because it lives right next to the unstable pole
-   and cannot be slowed.
+This ordering was **not** free - and it was the design tension of this build. A
+short body has a fast unstable pole (34 ms), so the balance loop must cross over
+high (~30 rad/s). Earlier, with the inner loop's measurement low-pass on
+(`tau_f = 20` ms), its closed-loop tracking sat at only ~26 rad/s - *below* the
+balance loop, inverting the cascade requirement. The fix was **not** a heroic inner
+retune; it was **removing the redundant lag**: with `tau_f = 0` (the `VEL_WIN`
+window already de-quantizes speed) and feedforward on, the inner loop tracks at
+$\tau_{cl}\approx25$ ms $\approx 40$ rad/s ([pi-tuning.md](pi-tuning.md),
+[../../experiments/closed-loop_identify/](../../experiments/closed-loop_identify/)).
+That single change opened the ~1.3x separation the cascade needs, at the same 500 Hz
+tick - no gain change, just less delay.
 
-Firmware realization: the 200 Hz control task runs the inner + balance loops every
-tick and the outer loops on a `tick % 4 == 0` sub-schedule (one code path, one
-timer).
+**Why the balance loop runs at 250 Hz.** Its crossover (~30 rad/s) is 52x below its
+250 Hz sample rate - deep in rule 3's comfort zone - and it gets ~8 corrections per
+34 ms doubling. It pays only the $-10^\circ$ ZOH lag from the section above and runs
+lockstep with the fresh estimate (no sub-rate staleness). The cascade sim confirms
+the recommended gains keep healthy margin. If CPU ever gets tight, the balancer can
+be sub-rated back to 125 Hz (`BALANCE_DIV = 2`) for $-21^\circ$ - still inside the
+margin.
 
 ## Sensor rates and anti-aliasing
 
@@ -200,22 +215,27 @@ MPU6050 ([../../firmware/main/imu.c](../../firmware/main/imu.c)) does this:
 
 ![IMU DLPF vs Nyquist: attenuation before folding](loop-rates-antialias.png)
 
-- **Internal sample rate 1 kHz** (`SMPLRT_DIV = 0`) - it oversamples, then we
-  decimate by reading once per 200 Hz tick.
+- **Internal ODR 500 Hz** (`SMPLRT_DIV = 1`, 1 kHz/(1+1)) streaming into the
+  on-chip **FIFO**; `imu_task` drains to the newest frame at 250 Hz
+  ([../../firmware/main/imu.c](../../firmware/main/imu.c)). So the sensor
+  oversamples and we decimate on read - and the FIFO means a late read loses no
+  sample, it just catches up.
 - **Digital low-pass ~44 Hz** (`CONFIG = 0x03`, ~44 Hz accel / ~42 Hz gyro). This
-  is the anti-alias filter for our 200 Hz read: 44 Hz sits below the 100 Hz Nyquist
-  with ~2.3x margin, and well above the ~5 Hz band the balance loop actually uses
-  (green band), so the signal passes with negligible phase lag
-  ($\arctan(5/42)\approx 7^\circ$ at 5 Hz) while structural vibration above ~100 Hz
+  is the anti-alias filter for the 250 Hz estimator read: 44 Hz sits below the
+  125 Hz Nyquist with ~2.8x margin, and well above the ~5 Hz band the balance loop
+  actually uses (green band), so the signal passes with negligible phase lag
+  ($\arctan(5/42)\approx 7^\circ$ at 5 Hz) while structural vibration above ~125 Hz
   is knocked down before it can fold in - e.g. a 150 Hz vibration is cut ~21 dB
-  before it would alias to 50 Hz.
+  before it would alias to 100 Hz.
 - If hardware shows high-frequency vibration leaking in, drop the DLPF to ~21 Hz
-  (`CONFIG = 0x04`) - still >4x the signal band. Do **not** raise it near 100 Hz.
+  (`CONFIG = 0x04`) - still >4x the signal band. Do **not** raise it near 125 Hz.
 
 **I2C bus 400 kHz** (`I2C_FREQ_HZ`): the 14-byte accel/temp/gyro block plus
-addressing is ~20 bytes x 9 bits / 400 kHz $\approx 0.45$ ms, a ~9% slice of the
-5 ms budget - fast enough to read every tick, which is why the estimator and
-control share the 200 Hz rate instead of splitting.
+addressing is ~20 bytes x 9 bits / 400 kHz $\approx 0.45$ ms *on the wire* - but the
+transaction can occasionally **block for milliseconds** (bus contention, clock
+stretching, driver stalls). That is exactly why the read does **not** share the
+500 Hz motor tick: it lives in the lower-priority 250 Hz `imu_task`, where a slow
+read delays only the estimate, never the wheel PWM.
 
 ## Actuator carrier: PWM at 10 kHz
 
@@ -226,41 +246,45 @@ right of the map. Placement:
 - **Far above the mechanics.** The wheel bandwidth is ~5 rad/s (0.84 Hz); at 10 kHz
   the motor sees a smooth average voltage (duty), not a switching square wave - the
   winding inductance filters the ripple current.
-- **50x the control rate.** Each 5 ms tick spans 50 PWM periods, so the commanded
-  duty is effectively a continuous actuator to the loop.
+- **20x the control rate.** Each 2 ms motor tick spans 20 PWM periods, so the
+  commanded duty is effectively a continuous actuator to the loop.
 - **At the top of the audible edge.** 10 kHz can whine; the code comment notes to
   lower it if it whines or heats. It must stay well above the control rate, so
   don't drop it below a few kHz.
 
 ## Telemetry and reporting
 
-Logging is deliberately decoupled from control. The loop writes **one sample per
-tick (full 200 Hz)** into a double buffer; a batch of `SAMPLES_PER_BATCH =
-CONTROL_HZ/2 = 100` samples (0.5 s) is handed to the reporter, which emits **~2
-frames per second** ([../../firmware/main/control.c](../../firmware/main/control.c),
-[../../firmware/main/telemetry.h](../../firmware/main/telemetry.h)). So we transmit
-at a network-friendly 2 Hz but never lose resolution - each frame carries the full
-200 Hz history. The per-tick period is checked against $\pm40\%$ limits
-(`DT_MAX/MIN_WARN_US`) so timing jitter surfaces as a warning instead of silently
-corrupting the loop.
+Logging is deliberately decoupled from control. `motor_task` writes **one sample
+per 500 Hz tick** (`REPORT_DIV = 1`) into a double buffer; every
+`SAMPLES_PER_BATCH = 100` samples (0.2 s) the buffer is handed to the reporter task
+on core 0 (~5 batches/s), which caches the latest and streams it to the browser
+([../../firmware/main/control.c](../../firmware/main/control.c),
+[../../firmware/main/telemetry.h](../../firmware/main/telemetry.h)). The reporter
+**decimates each topic at stream time**, so it records at full resolution but
+transmits at network-friendly rates: the motors topic streams tick-by-tick (500 Hz)
+during the motor-controller experiment and at 100 Hz otherwise, angles at 100 Hz,
+and the IMU topic at ~1 sample/s. Timing health is watched separately: each tick's
+period is checked against an **absolute $\pm1$ ms window** (`DT_JITTER_MARGIN_US` -
+not a percentage, because jitter sources like a scheduler wake or a ~1 ms I2C stall
+are fixed in time and don't scale with the rate), and the motor tick's compute time
+against an absolute `RUN_WARN_US = 500` µs ceiling.
 
 ## Summary: every rate and where it lives
 
-| Rate | Value | ÷ of tick | Set in | Rationale |
-|------|-------|-----------|--------|-----------|
-| Motor PWM carrier | 10 kHz | x50 | `motors.c` `MOTOR_PWM_FREQ_HZ` | above mechanics + audible edge, ≤ driver ceiling |
-| IMU internal ODR | 1 kHz | x5 | `imu.c` `SMPLRT_DIV=0` | oversample before decimation |
-| I2C bus clock | 400 kHz | - | `imu.c` `I2C_FREQ_HZ` | read IMU block in ~0.45 ms ≪ tick |
-| Control master tick | 200 Hz | x1 | `telemetry.h` `CONTROL_HZ` | ~7 updates / fall doubling; $T_d=7.5$ ms |
-| Inner wheel-speed loop | 200 Hz | ÷1 | (firmware TBD) | crossover 25.8 rad/s (retune to ~49) |
-| Balance loop | 200 Hz | ÷1 | (firmware TBD) | crossover above unstable 20.6 rad/s |
-| Yaw / velocity loops | 50 Hz | ÷4 | (firmware TBD) | slow, decoupled; separation + CPU |
-| IMU DLPF cutoff | ~44 Hz | - | `imu.c` `CONFIG=0x03` | anti-alias < 100 Hz Nyquist |
-| Telemetry frames | ~2 Hz | ÷100 | `telemetry.h` `SAMPLES_PER_BATCH` | network-friendly; full 200 Hz per frame |
+| Rate | Value | Relation | Set in | Rationale |
+|------|-------|----------|--------|-----------|
+| Motor PWM carrier | 10 kHz | x20 tick | `motors.c` `MOTOR_PWM_FREQ_HZ` | above mechanics + audible edge, ≤ driver ceiling |
+| IMU internal ODR | 500 Hz | -> FIFO | `imu.c` `SMPLRT_DIV=1` | oversample; FIFO absorbs a late read |
+| I2C bus clock | 400 kHz | - | `imu.c` `I2C_FREQ_HZ` | ~0.45 ms on the wire (can block ms -> own task) |
+| Motor + wheel-speed loop | 500 Hz | `CONTROL_HZ` | `telemetry.h` `CONTROL_HZ` | inner tracking ~40 rad/s; $T_d=3$ ms; de-quantizes encoder |
+| IMU read + estimator | 250 Hz | ÷2 | `control.c` `IMU_HZ` | blocking read off the motor tick; fresh angle |
+| Balance loop | 250 Hz | ÷2 (`BALANCE_DIV=1`) | `control.c` `BALANCE_HZ` | crossover ~30 > unstable 20.6, < inner 40; $T_d=6$ ms |
+| IMU DLPF cutoff | ~44 Hz | - | `imu.c` `CONFIG=0x03` | anti-alias < 125 Hz Nyquist |
+| Telemetry batches | ~5 Hz | 100 samples | `telemetry.h` `SAMPLES_PER_BATCH` | records at 500 Hz, decimates per topic at stream time |
 
-Digital rates are all integer fractions of the 200 Hz tick, so changing
-`CONTROL_HZ` rescales the loop rates and telemetry batch together (rule 1); the
-PWM and IMU rates are independent hardware carriers and stay put.
+The control rates are all integer fractions of the 500 Hz motor tick
+(500 / 250 / 250), so changing `CONTROL_HZ` rescales the ladder together (rule 1);
+the PWM and IMU-internal rates are independent hardware carriers and stay put.
 
 ## Reproduce
 
@@ -271,13 +295,14 @@ cd experiments/loop_rates
 octave --eval loop_rate_plots        # writes the four PNGs into docs/theory/
 ```
 
-The underlying plant numbers (unstable pole, wheel-loop crossover/margins) come
-from the simulation and tuning scripts:
+The underlying plant numbers (unstable pole, wheel-loop crossover/margins) and the
+balance gains come from the simulation and tuning scripts:
 
 ```bash
 cd simulation
 octave --eval "linearize"                          # open-loop poles; RHP pole + time-to-double
+octave --eval "sim_cascade"                        # multi-rate 500/250/250 balance run + plot
+octave --eval "tune_cascade"                       # sweep balance PID gains (Kp/Ki/Kd)
 cd ../experiments/motor_tuning
-octave --eval "pi_tuning_analysis(34, 0.19)"       # tau_cl=tau/5 -> wc=25.8, PM 67
-octave --eval "pi_tuning_analysis(34, 0.19, 0.019)"# tau_cl=tau/10 -> wc~49, PM ~48
+octave --eval "pi_tuning_analysis(34, 0.19)"       # inner loop: tau_cl=tau/5 -> wc=25.8, PM 67
 ```

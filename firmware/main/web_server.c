@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>               /* M_PI for deg<->rad */
 #include <inttypes.h>
 #include <sys/param.h>          /* MIN() */
 #include "freertos/FreeRTOS.h"
@@ -119,6 +120,7 @@ static void handle_command(httpd_req_t *req, const char *cmd)
             "exp motors|motor-ctrl|angles|balance - experiment preset\\n"
             "est on|off                    - angle estimation\\n"
             "alpha <0..1>                  - tilt estimator filter weight\\n"
+            "imuoffset <deg>               - IMU mounting tilt vs. horizontal (upright trim)\\n"
             "ctrl on|off                   - wheel-speed controller\\n"
             "balance on|off                - self-balance loop (also enables est+ctrl)\\n"
             "bgains <kp> <ki> <kd>         - set/report balance PID (bgains default resets)\\n"
@@ -165,6 +167,17 @@ static void handle_command(httpd_req_t *req, const char *cmd)
         char msg[128];
         snprintf(msg, sizeof(msg), "estimator alpha=%.4f (tau=%.3f s @ %d Hz)",
                  (double)cur, (double)tau, CONTROL_HZ);
+        ws_reply(req, msg);
+    } else if (strncmp(cmd, "imuoffset", 9) == 0) {
+        /* IMU mounting tilt vs. horizontal, in degrees: "imuoffset 3" sets, "imuoffset"
+         * reports. Subtracted from the estimated pitch so upright reads 0. */
+        float deg;
+        if (sscanf(cmd + 9, "%f", &deg) == 1) {
+            estimator_set_pitch_offset(deg * (float)(M_PI / 180.0));
+        }
+        char msg[80];
+        snprintf(msg, sizeof(msg), "imu pitch offset = %.2f deg",
+                 (double)(estimator_pitch_offset() * (float)(180.0 / M_PI)));
         ws_reply(req, msg);
     } else if (strcmp(cmd, "ctrl on") == 0) {
         control_set_controller(true);

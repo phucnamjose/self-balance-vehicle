@@ -32,13 +32,20 @@ static const char *TAG = "control";
 /* Gyro is reported in deg/s; the balance loop wants the tilt rate in rad/s. */
 #define DEG2RAD        (float)(M_PI / 180.0)
 
-/* The IMU read, orientation estimate and balance loop run in a separate imu_task at
- * this rate - a healthy margin above the ~32 rad/s crossover. Running the costly,
- * blocking MPU6050 read in its own lower-priority task keeps it off the motor tick, so
- * an I2C stall can never blow the 500 Hz budget. The MPU samples at 500 Hz into its
+/* The IMU read and orientation estimate run in a separate imu_task at this rate -
+ * a healthy margin above the ~32 rad/s crossover. Running the costly, blocking
+ * MPU6050 read in its own lower-priority task keeps it off the motor tick, so an
+ * I2C stall can never blow the 500 Hz budget. The MPU samples at 500 Hz into its
  * FIFO; the task consumes the newest at IMU_HZ. */
 #define IMU_HZ          250
-#define IMU_ALARM_COUNT (TIMER_RES_HZ / IMU_HZ)          /* 250 Hz IMU+balance tick */
+#define IMU_ALARM_COUNT (TIMER_RES_HZ / IMU_HZ)          /* 250 Hz IMU + estimator tick */
+
+/* Balance (outer) PID rate: it runs every BALANCE_DIV-th imu_task tick, i.e. at
+ * BALANCE_HZ. The estimator always fuses at the full IMU_HZ. BALANCE_HZ == IMU_HZ
+ * (BALANCE_DIV = 1) runs the PID every tick (least ZOH lag); drop BALANCE_HZ to
+ * sub-sample it, keeping it an integer divisor of IMU_HZ. */
+#define BALANCE_HZ      250
+#define BALANCE_DIV     (IMU_HZ / BALANCE_HZ)            /* imu ticks per balance step (= 1) */
 
 /* Consecutive stale IMU ticks that mean it is gone (~400 ms at 250 Hz), not a blip. */
 #define IMU_FAIL_LIMIT 100
@@ -597,6 +604,8 @@ static void imu_task(void *arg)
     uint32_t stale_streak = 0;                 /* consecutive ticks with no fresh sample */
     bool     primed = false;
     bool     bal_was = false;
+    uint32_t bal_div = 0;                       /* imu ticks since the last balance step */
+    float    bal_dt  = 0.0f;                    /* elapsed time accumulated for that step, s */
 
     for (;;) {
         uint32_t nt = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -660,23 +669,37 @@ static void imu_task(void *arg)
         imu_pub_write(&imu, roll, pitch);
 
         /* Balance (outer) loop -> common wheel-speed setpoint + fall-cut, consumed by the
-         * motor task. Above BALANCE_MAX_TILT the catch can't recover, so cut. Forcing the
+         * motor task. It runs at BALANCE_HZ (every BALANCE_DIV-th tick): accumulate the
+         * elapsed time and step the PID with that true dt so the integral gain stays
+         * correct; between steps the last w_common/cut hold (the motor task ZOH-consumes
+         * them anyway). Above BALANCE_MAX_TILT the catch can't recover, so cut. Forcing the
          * cut when disabled keeps a stale setpoint from leaking on the next enable. */
         if (s_bal_enabled) {
-            if (!bal_was) balance_pid_reset();   /* rising edge: clear the integrator */
-            bool have_theta = s_imu_present && s_est_enabled && isfinite(pitch);
-            if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
-                float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
-                s_bal_w_common = balance_pid_step(pitch, theta_dot, dt);
-                s_bal_cut = false;
-            } else {
+            if (!bal_was) {                      /* rising edge: clear integrator, resync sub-rate */
                 balance_pid_reset();
-                s_bal_w_common = 0.0f;
-                s_bal_cut = true;
+                bal_div = 0;
+                bal_dt  = 0.0f;
+            }
+            bal_dt += dt;
+            if (++bal_div >= BALANCE_DIV) {      /* BALANCE_HZ step */
+                bool have_theta = s_imu_present && s_est_enabled && isfinite(pitch);
+                if (have_theta && fabsf(pitch) < BALANCE_MAX_TILT) {
+                    float theta_dot = imu.gy * DEG2RAD;   /* tilt rate about Y, rad/s */
+                    s_bal_w_common = balance_pid_step(pitch, theta_dot, bal_dt);
+                    s_bal_cut = false;
+                } else {
+                    balance_pid_reset();
+                    s_bal_w_common = 0.0f;
+                    s_bal_cut = true;
+                }
+                bal_div = 0;
+                bal_dt  = 0.0f;
             }
         } else {
             s_bal_w_common = 0.0f;
             s_bal_cut = true;
+            bal_div = 0;                          /* resync so the first enabled step waits a full period */
+            bal_dt  = 0.0f;
         }
         bal_was = s_bal_enabled;
 

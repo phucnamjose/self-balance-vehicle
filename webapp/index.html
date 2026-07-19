@@ -311,6 +311,14 @@
       <span class="hint" id="gyrocalHint">hold the robot still (any pose) for ~2 s; needs the control task running.</span>
     </div>
 
+    <div class="row" style="margin-top:10px">
+      <span class="k">IMU pitch offset:</span>
+      <input type="number" id="imuoffIn" step="0.1" value="-3" style="width:80px" />
+      <span class="k">deg</span>
+      <button onclick="applyImuOffset()">Set</button>
+      <span class="hint">mounting tilt vs. true horizontal; subtracted from the estimated pitch so a level robot reads 0 (the mechanics aren't perfectly level).</span>
+    </div>
+
     <div class="plottitle">robot attitude &mdash; body tilt vector from upright</div>
     <canvas id="attitude" class="plot" style="height:280px"></canvas>
     <div class="hint" style="margin-top:4px">side view: front is to the right, so <code>+pitch</code> = tipped forward (X/Y/Z per docs/hardware/robot-mechanics.md).</div>
@@ -409,6 +417,7 @@
     <div id="bar">
       <input id="in" placeholder="type a command (try: help) and press Enter" autocomplete="off" />
       <button onclick="sendCmd()">Send</button>
+      <button class="ghost" onclick="clearLog()">Clear log</button>
     </div>
   </div>
 
@@ -436,6 +445,8 @@
       term.scrollTop = term.scrollHeight;
       while (term.childElementCount > 500) term.removeChild(term.firstChild);
     }
+
+    function clearLog() { term.textContent = ''; }
 
     const f2 = (x) => (Number.isNaN(x) ? '--' : (x >= 0 ? '+' : '') + x.toFixed(2));
     const f1 = (x) => (Number.isNaN(x) ? '--' : (x >= 0 ? '+' : '') + x.toFixed(1));
@@ -537,6 +548,7 @@
           add(d.text, 'resp');
           syncGains(d.text);
           syncAlpha(d.text);
+          syncImuOffset(d.text);
           syncGyrocal(d.text);
           syncBGains(d.text);
           syncBWeight(d.text);
@@ -1150,6 +1162,15 @@
       if (h && tau) h.textContent = `\u03c4 = ${tau[1]} s \u2014 higher \u03b1 trusts the gyro more (smoother, slower drift correction).`;
     }
 
+    /* IMU pitch offset: sync from "imu pitch offset = 3.00 deg" reply. */
+    function applyImuOffset() { send('imuoffset ' + document.getElementById('imuoffIn').value); }
+    function syncImuOffset(text) {
+      const m = text.match(/imu pitch offset = ([-\d.]+) deg/);
+      if (!m) return;
+      const el = document.getElementById('imuoffIn');
+      if (el && document.activeElement !== el) el.value = parseFloat(m[1]);
+    }
+
     /* Gyrocal: mirror firmware reply in hint. */
     function gyrocal() { send('gyrocal'); }
     function syncGyrocal(text) {
@@ -1169,7 +1190,7 @@
       if (ws && ws.readyState === WebSocket.OPEN) {
         if (EXP_FOR_TAB[name]) {
           send(EXP_FOR_TAB[name]);
-          if (name === 'angle') { send('est on'); send('alpha'); }   /* enable + fetch current alpha */
+          if (name === 'angle') { send('est on'); send('alpha'); send('imuoffset'); }   /* enable + fetch current alpha + IMU offset */
           if (name === 'ctrl')  { send('gains'); send('bweight'); send('slew'); send('tauf'); }   /* fetch PI gains + b + slew + tau_f */
         } else if (name === 'balance') {
           /* Safe idle: est on for display, balance off until operator starts. */

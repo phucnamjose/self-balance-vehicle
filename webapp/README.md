@@ -48,8 +48,10 @@ between are the tabs, each matching an experiment mode:
    setpoint wheel speed, and the motor output (applied duty vs. the raw PI
    command before deadband compensation and saturation).
 3. **Angle Estimator** (`TEST_ANGLES_ESTIMATION`) - the firmware tilt estimate:
-   pitch readout, complementary-filter `alpha` editor, the attitude vector view,
-   and a pitch plot.
+   pitch readout, complementary-filter `alpha` editor, gyro calibration, an **IMU
+   pitch offset** box (`imuoffset <deg>`: the mounting tilt vs. true horizontal,
+   subtracted from the estimate so a level robot reads 0; default -3 deg), the
+   attitude vector view, and a pitch plot.
 4. **Balance** (`TEST_BALANCE`) - the self-balancing tilt loop
    (`docs/theory/balance-controller.md`). **Start/STOP balancing** buttons
    (`balance on`/`off`), the balance-PID tuning boxes (`bgains <kp> <ki> <kd>`,
@@ -67,6 +69,9 @@ need the control task running (**START**, top bar); flashing needs it stopped
 
 ## Notes
 
+- Terminal: type commands (try `help`) and press Enter or **Send**; replies and
+  warnings are timestamped in the data log. **Clear log** empties the log view
+  (device state is untouched).
 - Serve the page over **http** (not https). A secure page cannot open a plain
   `ws://` connection to the device (mixed-content blocking).
 - The ESP32 sends `Access-Control-Allow-Origin: *` on `/api`, `/ota`,

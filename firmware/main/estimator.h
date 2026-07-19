@@ -24,6 +24,13 @@ void estimator_reset(void);
 void  estimator_set_alpha(float a);
 float estimator_alpha(void);
 
+/* IMU mounting offset [rad]: the pitch the estimator reads when the robot is
+ * mechanically upright (the sensor board is never perfectly level). Subtracted from
+ * the reported pitch so "upright" reads 0. Default ~-3 deg; setter clamps to +/-0.5
+ * rad. Survives estimator_reset() - it is a calibration, not filter state. */
+void  estimator_set_pitch_offset(float rad);
+float estimator_pitch_offset(void);
+
 /* One step from IMU sample @p imu over period @p dt (s): seeds from the accel on
  * the first good sample, then blends gyro + accel (holds the last estimate on a
  * failed read). Writes @p roll / @p pitch (rad); returns true once valid. */

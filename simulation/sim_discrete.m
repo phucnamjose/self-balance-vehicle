@@ -1,5 +1,7 @@
-% SIM_DISCRETE  Realistic loop: 200 Hz, IMU, complementary filter, motor model.
-% Adds sampling/ZOH, noisy sensors, back-EMF feedforward, deadband compensation.
+% SIM_DISCRETE  Realistic single-loop force-PID balancer at the firmware motor rate
+% (p.f_ctrl = 500 Hz): IMU, complementary filter, motor model, sampling/ZOH, noisy
+% sensors, back-EMF feedforward, deadband compensation. (The cascade version is
+% sim_cascade.m; this one commands force directly for the balance-controller theory.)
 
 clear; clc;
 p = params();
@@ -19,9 +21,9 @@ F_stall = p.n_wheels * p.motor.tau_stall / p.r_wheel;                 % [N] at w
 K_bemf  = p.n_wheels * p.motor.tau_stall / (p.motor.w_noload * p.r_wheel^2); % [N/(m/s)]
 
 % ---- Timing -------------------------------------------------------------
-dt_ctrl = p.dt_ctrl;          % 5 ms control period
+dt_ctrl = p.dt_ctrl;          % 2 ms control period (500 Hz)
 n_sub   = 5;                  % plant substeps per control tick
-dt_sub  = dt_ctrl / n_sub;    % 1 ms integration step
+dt_sub  = dt_ctrl / n_sub;    % 0.4 ms integration step
 T       = 5.0;
 Nticks  = round(T / dt_ctrl);
 

@@ -41,9 +41,12 @@ function p = params()
   % Without it sim inner loop is ~5x too fast vs measured ~0.19 s.
   p.motor.tau_e     = 0.19;                      % duty->speed time constant [s] (measured)
 
-  % ---- Control loop ---------------------------------------------------
-  p.f_ctrl  = 200;            % control rate [Hz]  (matches firmware CONTROL_HZ)
-  p.dt_ctrl = 1 / p.f_ctrl;   % control period [s] = 5 ms
+  % ---- Control loop (two-task firmware: motor 500 / imu 250 / balance 250) ----
+  p.f_motor = 500;            % motor + wheel-PI rate [Hz] (firmware CONTROL_HZ)
+  p.f_imu   = 250;            % imu_task rate [Hz] (MPU read + complementary filter)
+  p.f_bal   = 250;            % balance-PID rate [Hz] (BALANCE_DIV=1: every imu tick)
+  p.f_ctrl  = p.f_motor;      % alias: fastest (motor) tick
+  p.dt_ctrl = 1 / p.f_ctrl;   % motor period [s] = 2 ms
 
   % ---- Encoder (firmware units mapping) --------------------------------
   p.counts_per_wheel_rev = 1320;   % 4x quadrature, GB37-520 (11 PPR * 30 * 4)

@@ -4,9 +4,10 @@
  *
  * Two core-1 tasks, each woken by its own GPTimer ISR: motor_task at CONTROL_HZ
  * (encoders, wheel PI, motor output, telemetry - never touches I2C) and the lower
- * priority imu_task at IMU_HZ (MPU6050 read, estimator, balance PID). imu_task
- * publishes the common wheel-speed setpoint the motor loop tracks. motor_task hands a
- * batch to reporter_task (core 0), which caches, logs and streams it to WebSocket clients.
+ * priority imu_task at IMU_HZ (MPU6050 read + estimator + balance PID at BALANCE_HZ,
+ * = IMU_HZ by default). imu_task publishes the common wheel-speed setpoint the
+ * motor loop tracks. motor_task hands a batch to reporter_task (core 0), which caches,
+ * logs and streams it to WebSocket clients.
  */
 #pragma once
 

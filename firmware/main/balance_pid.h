@@ -20,7 +20,7 @@
 
 /* Output ceiling for the common wheel-speed command [rad/s], below the wheel's
  * no-load top speed so the inner loop can still track it. */
-#define BALANCE_W_MAX      30.0f
+#define BALANCE_W_MAX      20.0f
 
 /* Tilt magnitude [rad] past which the robot is considered fallen (~34 deg): the
  * supervisor (control.c) then cuts the motors instead of a doomed lunge. */

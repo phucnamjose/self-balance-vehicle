@@ -67,11 +67,12 @@ speed. This is the cascade from [README.md](README.md):
 - **Output:** `w_common`, a wheel-speed setpoint - *not* a raw duty. The inner
   loop absorbs motor mismatch, deadband, and back-EMF, so the balancer sees two
   clean, identical wheels ([README.md](README.md)).
-- **Timescale separation:** the inner loop must be much faster than this one so
+- **Timescale separation:** the inner loop must be faster than this one so
   the balancer can treat "commanded speed = actual speed." For this short,
-  twitchy body that separation is *tight* - the balance crossover (~30-40 rad/s)
-  sits just below the retuned inner loop - which is exactly why the inner loop
-  had to be tightened; see the cascade discussion in
+  twitchy body that separation is *tight* - the balance crossover (~30 rad/s)
+  sits just below the inner loop's ~40 rad/s closed-loop tracking. That headroom
+  came from **removing the inner loop's redundant measurement low-pass**
+  (`tau_f = 0`), not from a gain change; see the cascade discussion in
   [loop-rates.md](loop-rates.md).
 
 > **A note on units.** The design and the simulation below reason in terms of a
@@ -190,15 +191,18 @@ an LQR).
 
 ## 7. Discretization and rate
 
-On the robot this law runs as a difference equation at **200 Hz**, the same tick
-as the inner loop and estimator:
+On the robot this law runs as a difference equation at **250 Hz**, in lockstep
+with the 250 Hz `imu_task` (the estimator fuses tilt at 250 Hz and the PID steps
+every tick, `BALANCE_DIV = 1`):
 
-- The integral $\int\theta\,dt$ becomes a running forward-Euler sum; the
-  derivative term is the measured gyro rate (no numerical differentiation).
-- 200 Hz is $\approx 60\times$ the unstable pole - comfortable by the
-  rule-of-thumb in [loop-rates.md](loop-rates.md) - but the tight cascade
-  separation for this short body is what motivates 200 Hz (and possibly 400 Hz)
-  rather than something slower.
+- The integral $\int\theta\,dt$ becomes a running forward-Euler sum over the true
+  4 ms step; the derivative term is the measured gyro rate (no numerical
+  differentiation).
+- 250 Hz is $\approx 76\times$ the unstable pole and gives ~8 corrections per
+  34 ms doubling. Its sample-and-hold costs only $\approx 10^\circ$ at the ~30 rad/s
+  crossover, well inside the margin the cascade sim shows at the recommended gains.
+  It can be sub-rated back to 125 Hz (`BALANCE_DIV = 2`, $\approx 21^\circ$) if CPU
+  gets tight - see [loop-rates.md](loop-rates.md).
 - The continuous $\to$ discrete conventions (and integral anti-windup as a
   difference equation) are the shared ones in
   [pi-discretization.md](pi-discretization.md).
@@ -232,16 +236,28 @@ as the inner loop and estimator:
 - **Firmware now implements this loop** as the `balance_pid` module
   ([../../firmware/main/balance_pid.c](../../firmware/main/balance_pid.c)): a tilt
   PID that outputs the common wheel-speed command `w_common` fed to both inner
-  loops. It runs each 200 Hz tick under the `TEST_BALANCE` preset (`exp balance`
-  / `balance on`), reading $\theta$ from the estimator and $\dot\theta$ straight
-  from the gyro, with the fall cut-off of §8 (`BALANCE_MAX_TILT`). Gains are
-  live-tunable (`bgains <kp> <ki> <kd>`), the upright trim with `btrim`.
-- **The gains are seeds, not yet tuned.** Unlike the inner loop (whose gains come
-  from a bench motor-id), the outer-loop gains in wheel-speed units are not
-  identifiable offline, so the compiled defaults are conservative starting points
-  to be raised on hardware (Kp until it holds, Kd to damp, a little Ki to remove
-  lean). The **sign** of $\theta$ vs. the drive direction must also be confirmed
-  on the robot.
+  loops. It runs at 250 Hz under the `TEST_BALANCE` preset (`exp balance` /
+  `balance on`), reading $\theta$ from the estimator and $\dot\theta$ straight
+  from the gyro, with the fall cut-off of §8 (`BALANCE_MAX_TILT`) and the output
+  clamped to $\pm$`BALANCE_W_MAX` = 20 rad/s. Gains are live-tunable
+  (`bgains <kp> <ki> <kd>`), the upright trim with `btrim`.
+- **The gains are simulation seeds.** The compiled defaults **`Kp = 45, Ki = 450,
+  Kd = 3`** come from the multi-rate cascade sweep
+  ([../../simulation/tune_cascade.m](../../simulation/tune_cascade.m), which ports
+  the firmware inner loop with `tau_f = 0` + FF and runs balance at 250 Hz). In
+  this **velocity** cascade the roles are *not* the textbook ones - the output is
+  a wheel *speed*, whose derivative is the base acceleration:
+  - **$K_i$ is the restoring stiffness.** It must clear $g/r \approx 302$
+    (rad/s per rad) to out-torque gravity; 450 gives ~50% margin.
+  - **$K_p$ is the damping** (it sets $\dot\theta$ feedback through the base).
+  - **$K_d$ behaves like added base inertia - so keep it small.** Large $K_d$
+    slows and under-damps the catch, the opposite of a force-PID.
+
+  Because the fast `tau_f = 0` inner loop passes hot commands faithfully,
+  over-large gains (especially $K_d$) chatter the duty and the resulting cart
+  acceleration corrupts the tilt estimate (the accelerometer senses base accel as
+  apparent tilt) - raise gently on hardware, and confirm the **sign** of $\theta$
+  vs. drive direction first.
 - **The simulation already balances** the robot end-to-end: the PID
   ([../../simulation/sim_closedloop_pid.m](../../simulation/sim_closedloop_pid.m)),
   the LQR ([../../simulation/lqr_design.m](../../simulation/lqr_design.m)), and

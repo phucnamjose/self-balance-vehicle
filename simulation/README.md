@@ -36,11 +36,11 @@ State everywhere: `x = [pos; vel; theta; omega]`
 | 3 | `sim_openloop.m` | Integrate the uncontrolled plant; watch it fall |
 | 4 | `linearize.m` | Linearize about upright; eigenvalues + controllability |
 | 5 | `sim_closedloop_pid.m` | Balance it with a tuned PID; plot recovery |
-| 6 | `sim_discrete.m` | Realistic 200 Hz loop: sensors, filter, motor model (force-based) |
+| 6 | `sim_discrete.m` | Realistic 500 Hz loop: sensors, filter, motor model (force-based) |
 | 7 | `lqr_design.m`, `lqr_gain.m` | LQR / state-feedback (self-contained Riccati solver); compare against PID |
 | 8 | `MAPPING.md` | Convert tuned gains + states to firmware units |
 | 9 | `wheel_pi_sim.m`, `balance_pid_sim.m` | Faithful ports of the firmware controllers (`wheel_pi.c`, `balance_pid.c`) |
-| 9 | `sim_cascade.m` | Realistic 200 Hz loop in the **firmware cascade**: balance PID -> wheel-speed PI -> motor -> plant |
+| 9 | `sim_cascade.m` | Multi-rate (motor 500 / imu 250 / balance 250 Hz) **firmware cascade**: balance PID -> wheel-speed PI -> motor -> plant |
 | 9 | `tune_cascade.m` | Sweep balance-PID gains over `sim_cascade` and score for a clean balance |
 
 The plotting scripts also write a `*.png` of their result next to the script.
@@ -57,18 +57,21 @@ The plotting scripts also write a `*.png` of their result next to the script.
   A key consequence, which the cascade makes visible: with a wheel-*speed* inner loop the
   base *acceleration* is the derivative of the command, so the balance gain **roles rotate** -
   `Ki` is the restoring *stiffness* (and must satisfy `r*Ki > g`, i.e. `Ki > g/r ~= 302`), `Kp`
-  is *damping*, `Kd` adds effective inertia (slows the loop so the motor lag hurts less).
+  is *damping*, and `Kd` adds effective base inertia - which now *slows/under-damps* the catch,
+  so **keep it small** (opposite of a force-PID's derivative term).
 
-  **The motor lag matters a lot.** `params.m` models the identified actuator lag
-  (`p.motor.tau_e ~= 0.19 s`), and `sim_cascade.m` drives the inner loop with the *actual*
-  firmware `wheel_pi` gains - so the sim inner loop matches the robot's (~37 ms closed-loop),
-  not an idealized fast one. On this honest plant:
-  - The ideal-motor optimum `Kp=18, Ki=750, Kd=0` **falls** (limit-cycles) - reproducing the
-    hardware behavior; the lag erodes the phase margin of that lightly-damped design.
-  - A robust balance is around **`Kp~=60, Ki~=500, Kd~=8`** (heavy damping, lower stiffness) -
-    `tune_cascade.m` searches and scores this. These transfer to hardware far better than the
-    ideal-motor set (tune on the robot from here). Tilt-only still drifts (~13 cm/8 s); a
-    velocity/position outer loop is the next layer.
+  **The inner loop's speed and lag matter a lot.** `params.m` models the identified actuator
+  lag (`p.motor.tau_e ~= 0.19 s`); `sim_cascade.m` drives the inner loop with the *actual*
+  firmware `wheel_pi` gains, the measurement low-pass **OFF** (`tau_f = 0`, as shipped) and
+  feedforward on - so the sim inner loop matches the robot's identified ~25 ms closed-loop
+  *tracking*, not an idealized fast one. On this honest plant (multi-rate 500/250/250):
+  - A robust balance is a broad, flat optimum around **`Kp~=45, Ki~=450, Kd~=3`** (`Ki` well
+    above the `g/r~=302` stiffness floor, small `Kd`) - `tune_cascade.m` searches and scores
+    this. These are the firmware seed gains; tune on the robot from here.
+  - With the fast `tau_f=0` inner loop the duty follows hot commands faithfully, so over-large
+    gains (especially `Kd`) chatter the duty and the cart acceleration corrupts the tilt
+    estimate - the sweep favors the lowest gains that still hold. Tilt-only still drifts
+    (~30 cm/8 s); a velocity/position outer loop is the next layer.
 
 ## Running
 

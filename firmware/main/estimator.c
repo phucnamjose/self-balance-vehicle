@@ -11,9 +11,15 @@
 #define COMP_REF_DT         (1.0f / 500.0f)   // rate alpha is quoted at [s]
 #define DEG2RAD             (float)(M_PI / 180.0)
 
-/* alpha: written by the web task (core 0), read by the control loop (core 1);
- * volatile keeps cross-core reads honest. */
-static volatile float s_alpha = COMP_ALPHA_DEFAULT;
+/* Default IMU mounting tilt vs. horizontal [rad]; the board reads ~-3 deg at upright
+ * (subtracted from pitch, so a level robot reads 0). */
+#define PITCH_OFFSET_DEFAULT (-3.0f * DEG2RAD)
+#define PITCH_OFFSET_MAX     0.5f              // sanity clamp, ~28.6 deg
+
+/* alpha + pitch offset: written by the web task (core 0), read by the control loop
+ * (core 1); volatile keeps cross-core reads honest. */
+static volatile float s_alpha        = COMP_ALPHA_DEFAULT;
+static volatile float s_pitch_offset = PITCH_OFFSET_DEFAULT;
 
 /* Filter state, touched only by the control loop via update(). */
 static float s_roll, s_pitch;   /* current estimate, rad */
@@ -28,6 +34,15 @@ void estimator_set_alpha(float a)
     if (a < 0.0f)           a = 0.0f;
     if (a > COMP_ALPHA_MAX) a = COMP_ALPHA_MAX;
     s_alpha = a;
+}
+
+float estimator_pitch_offset(void) { return s_pitch_offset; }
+
+void estimator_set_pitch_offset(float rad)
+{
+    if (rad >  PITCH_OFFSET_MAX) rad =  PITCH_OFFSET_MAX;
+    if (rad < -PITCH_OFFSET_MAX) rad = -PITCH_OFFSET_MAX;
+    s_pitch_offset = rad;
 }
 
 bool estimator_update(imu_t imu, float dt, float *roll, float *pitch)
@@ -54,7 +69,8 @@ bool estimator_update(imu_t imu, float dt, float *roll, float *pitch)
         }
     }
     /* Publish the current estimate (a failed read holds the last value); unset only
-     * until the first good sample seeds the filter. */
-    if (s_init) { *roll = s_roll; *pitch = s_pitch; }
+     * until the first good sample seeds the filter. Subtract the mounting offset so
+     * a mechanically-upright robot reads pitch = 0. */
+    if (s_init) { *roll = s_roll; *pitch = s_pitch - s_pitch_offset; }
     return s_init;
 }
