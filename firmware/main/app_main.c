@@ -10,6 +10,7 @@
  *
  * Wiring: MPU6050 SDA=21 SCL=22 (addr 0x68). Motors (XY-160D) L EN=25 IN=26,27,
  * R EN=33 IN=32,14. Encoders L A=18 B=19, R A=23 B=13 (PCNT). LEDs L=17 R=16.
+ * Start/stop-balance button on GPIO4 (active-low to GND, internal pull-up).
  */
 #include <stdio.h>
 #include <inttypes.h>

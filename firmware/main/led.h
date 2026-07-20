@@ -22,4 +22,5 @@ void led_blink(uint16_t on_ms, uint16_t off_ms, int16_t count);
 
 void led_off(void);
 void led_on(void);
-void led_heartbeat(void);
+void led_heartbeat(void);       /* slow ~0.5 Hz idle heartbeat */
+void led_heartbeat_1hz(void);   /* faster 1 Hz heartbeat (balance loop running) */

@@ -49,6 +49,7 @@ Our committed pin allocation. Anything not listed is free for later use.
 | GPIO | Used for | Notes |
 |------|----------|-------|
 | 0 | BOOT button | Strapping pin; also the boot-mode select |
+| 4 | Start/stop-balance button | Active-low to GND, internal pull-up; toggles the balance loop |
 | 13 | Right encoder B | Pull-up capable |
 | 14 | Motor R IN4 (dir) | Direction output |
 | 16 | Right LED / notify | Plain digital out |

@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/gptimer.h"
+#include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 
@@ -18,6 +19,7 @@
 #include "balance_pid.h"
 #include "estimator.h"
 #include "web_server.h"
+#include "led.h"
 
 static const char *TAG = "control";
 
@@ -49,6 +51,13 @@ static const char *TAG = "control";
 
 /* Consecutive stale IMU ticks that mean it is gone (~400 ms at 250 Hz), not a blip. */
 #define IMU_FAIL_LIMIT 100
+
+/* Start/stop-balance push button: active-low to GND, internal pull-up (idle high).
+ * Polled + debounced in a low-priority task; a confirmed press toggles the balance
+ * loop. Debounce = BTN_DEBOUNCE_N stable polls of BTN_POLL_MS each. */
+#define BUTTON_GPIO    GPIO_NUM_4
+#define BTN_POLL_MS    15
+#define BTN_DEBOUNCE_N 3
 
 /* Emit the periodic loop-stats line every STATS_DIV telemetry batches (~1 s). */
 #define STATS_DIV      (1000 / BATCH_MS)
@@ -975,6 +984,52 @@ static void reporter_task(void *arg)
     }
 }
 
+/* Toggle the balance loop, mirroring the web "balance on"/"balance off": enabling
+ * needs the estimator + inner wheel loop too; disabling drops the setpoints the
+ * balancer owned so the wheels park instead of holding its last command. */
+static void balance_toggle(void)
+{
+    if (control_balance_enabled()) {
+        control_set_balance(false);
+        wheel_pi_set_setpoint(0, 0.0f);
+        wheel_pi_set_setpoint(1, 0.0f);
+    } else {
+        control_set_estimation(true);
+        control_set_controller(true);
+        control_set_balance(true);
+    }
+    ESP_LOGI(TAG, "button: balance %s", control_balance_enabled() ? "ON" : "OFF");
+}
+
+/* Poll the active-low start/stop button on core 0 and toggle balance on a debounced
+ * press (high->low). Low priority: it only flips volatile flags the control loops
+ * read, so it never touches the real-time path. */
+static void button_task(void *arg)
+{
+    (void)arg;
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << BUTTON_GPIO,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+
+    int stable = gpio_get_level(BUTTON_GPIO);   /* debounced level, idle high */
+    int cand   = stable, n = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(BTN_POLL_MS));
+        int raw = gpio_get_level(BUTTON_GPIO);
+        if (raw == stable) { cand = stable; n = 0; continue; }
+        if (raw != cand)   { cand = raw; n = 1; continue; }
+        if (++n >= BTN_DEBOUNCE_N) {            /* level held long enough: commit */
+            stable = raw; n = 0;
+            if (stable == 0) balance_toggle();  /* fire on press, not release */
+        }
+    }
+}
+
 void control_start(void)
 {
     /* Ready-buffer index queue. Length 2 so the motor task can hand over even
@@ -985,6 +1040,9 @@ void control_start(void)
     /* Reporter on core 0 (shares with Wi-Fi). If Wi-Fi/WebSocket stalls, only this
      * task waits; the control loops are unaffected. */
     xTaskCreatePinnedToCore(reporter_task, "reporter", 4096, NULL, 4, NULL, 0);
+
+    /* Start/stop-balance button poller on core 0, low priority (off the RT core). */
+    xTaskCreatePinnedToCore(button_task, "button", 2048, NULL, 2, NULL, 0);
 
     /* Start the motor task (created on core 1; it brings up peripherals + both GPTimers
      * there and spawns the IMU task). */
@@ -1028,11 +1086,11 @@ void control_set_mode(control_mode_t mode)
 void control_set_experiment(experiment_mode_t mode)
 {
     switch (mode) {
-        case TEST_MOTOR_CONTROLLERS: s_est_enabled = false; s_ctrl_enabled = true;  s_bal_enabled = false; break;
-        case TEST_ANGLES_ESTIMATION: s_est_enabled = true;  s_ctrl_enabled = false; s_bal_enabled = false; break;
-        case TEST_BALANCE:           s_est_enabled = true;  s_ctrl_enabled = true;  s_bal_enabled = true;  break;
+        case TEST_MOTOR_CONTROLLERS: s_est_enabled = false; s_ctrl_enabled = true;  control_set_balance(false); break;
+        case TEST_ANGLES_ESTIMATION: s_est_enabled = true;  s_ctrl_enabled = false; control_set_balance(false); break;
+        case TEST_BALANCE:           s_est_enabled = true;  s_ctrl_enabled = true;  control_set_balance(true);  break;
         case TEST_MOTORS:
-        default:                     s_est_enabled = false; s_ctrl_enabled = false; s_bal_enabled = false; break;
+        default:                     s_est_enabled = false; s_ctrl_enabled = false; control_set_balance(false); break;
     }
 }
 
@@ -1041,7 +1099,16 @@ void control_set_estimation(bool on)  { s_est_enabled = on; }
 bool control_controller_enabled(void) { return s_ctrl_enabled; }
 void control_set_controller(bool on)  { s_ctrl_enabled = on; }
 bool control_balance_enabled(void)    { return s_bal_enabled; }
-void control_set_balance(bool on)     { s_bal_enabled = on; }
+
+void control_set_balance(bool on)
+{
+    /* On a state change, bump the LED: 1 Hz heartbeat while the balance loop runs,
+     * the slow idle heartbeat otherwise, so the robot's state shows without the web. */
+    if (on != s_bal_enabled) {
+        if (on) led_heartbeat_1hz(); else led_heartbeat();
+    }
+    s_bal_enabled = on;
+}
 
 void control_playback_begin(playback_kind_t kind)
 {

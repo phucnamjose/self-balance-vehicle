@@ -27,9 +27,10 @@ void led_blink(uint16_t on_ms, uint16_t off_ms, int16_t count)
     if (s_led_q) xQueueOverwrite(s_led_q, &p);
 }
 
-void led_off(void)       { led_blink(0, 0, 0); }
-void led_on(void)        { led_blink(1, 0, -1); }
-void led_heartbeat(void) { led_blink(60, 1940, -1); }
+void led_off(void)           { led_blink(0, 0, 0); }
+void led_on(void)            { led_blink(1, 0, -1); }
+void led_heartbeat(void)     { led_blink(60, 1940, -1); }   /* ~0.5 Hz */
+void led_heartbeat_1hz(void) { led_blink(60, 940, -1); }    /* 1 Hz: balancing */
 
 static void led_task(void *arg)
 {
